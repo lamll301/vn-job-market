@@ -1,10 +1,178 @@
 import asyncio
+import math
+import re
 import threading
 import tkinter as tk
+import webbrowser
 from datetime import datetime
+from html import escape
+from html.parser import HTMLParser
+from tkinter import font as tkfont
 from tkinter import ttk
 
 import customtkinter as ctk
+
+class HtmlTextRenderer(HTMLParser):
+    """Đổ HTML đơn giản vào tk.Text (không cần thư viện ngoài).
+
+    Hỗ trợ: p, div, br, b/strong, i/em, u, h1-h6, ul/ol/li.
+    HTML từ các trang tuyển dụng chủ yếu chỉ dùng vài thẻ cơ bản này.
+    """
+
+    BLOCK_TAGS = {
+        "p", "div", "section", "article", "blockquote",
+        "table", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
+    }
+
+    STYLE_TAGS = {
+        "b": "bold",
+        "strong": "bold",
+        "i": "italic",
+        "em": "italic",
+        "u": "underline",
+        "h1": "heading",
+        "h2": "heading",
+        "h3": "heading",
+        "h4": "heading",
+        "h5": "heading",
+        "h6": "heading",
+    }
+
+    SKIP_TAGS = {"script", "style"}
+
+    def __init__(self, text_widget):
+        super().__init__(convert_charrefs=True)
+
+        self.text = text_widget
+        self.styles = []
+        self.lists = []
+        self.indent_tag = None
+        self.at_line_start = True
+        self.skip_depth = 0
+
+    # --------------------------------------------------------
+    # Public
+    # --------------------------------------------------------
+
+    @classmethod
+    def render(cls, text_widget, html):
+        text_widget.configure(state="normal")
+        text_widget.delete("1.0", "end")
+
+        parser = cls(text_widget)
+        parser.feed(html)
+        parser.close()
+        parser.strip_trailing_newline()
+
+        text_widget.configure(state="disabled")
+        text_widget.yview_moveto(0)
+
+    def strip_trailing_newline(self):
+        if self.text.get("end-2c", "end-1c") == "\n":
+            self.text.delete("end-2c", "end-1c")
+
+    # --------------------------------------------------------
+    # Helpers
+    # --------------------------------------------------------
+
+    def _insert(self, content):
+        tags = list(self.styles)
+
+        if self.indent_tag:
+            tags.append(self.indent_tag)
+
+        self.text.insert("end", content, tuple(tags))
+        self.at_line_start = content.endswith("\n")
+
+    def _break(self):
+        """Xuống dòng, nhưng không tạo dòng trống thừa."""
+        if not self.at_line_start:
+            self._insert("\n")
+
+    def _remove_style(self, style):
+        for index in range(len(self.styles) - 1, -1, -1):
+            if self.styles[index] == style:
+                del self.styles[index]
+                return
+
+    # --------------------------------------------------------
+    # HTMLParser callbacks
+    # --------------------------------------------------------
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.SKIP_TAGS:
+            self.skip_depth += 1
+            return
+
+        if tag == "br":
+            self._break()
+            return
+
+        if tag in ("ul", "ol"):
+            self._break()
+            self.lists.append([tag, 0])
+
+        elif tag == "li":
+            self._break()
+
+            if not self.lists:
+                self.lists.append(["ul", 0])
+
+            current = self.lists[-1]
+            current[1] += 1
+
+            marker = (
+                f"{current[1]}. "
+                if current[0] == "ol"
+                else "• "
+            )
+
+            self.indent_tag = f"indent{min(len(self.lists), 3)}"
+            self._insert(marker)
+
+        elif tag in self.BLOCK_TAGS:
+            self._break()
+
+        style = self.STYLE_TAGS.get(tag)
+
+        if style:
+            self.styles.append(style)
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP_TAGS:
+            self.skip_depth = max(0, self.skip_depth - 1)
+            return
+
+        style = self.STYLE_TAGS.get(tag)
+
+        if style:
+            self._remove_style(style)
+
+        if tag == "li":
+            self._break()
+            self.indent_tag = None
+
+        elif tag in ("ul", "ol"):
+            self._break()
+
+            if self.lists:
+                self.lists.pop()
+
+        elif tag in self.BLOCK_TAGS:
+            self._break()
+
+    def handle_data(self, data):
+        if self.skip_depth:
+            return
+
+        data = re.sub(r"\s+", " ", data)
+
+        if self.at_line_start:
+            data = data.lstrip()
+
+        if data:
+            self._insert(data)
+
 
 class MainWindow:
     # ============================================================
@@ -21,8 +189,8 @@ class MainWindow:
     # Layout
     # ============================================================
 
-    LEFT_RATIO = 0.70
-    RIGHT_RATIO = 0.30
+    LEFT_RATIO = 0.60
+    RIGHT_RATIO = 0.40
 
     PAGE_SIZE = 20
 
@@ -49,6 +217,30 @@ class MainWindow:
     SELECTED = "#DBEAFE"
 
     JD_BG = "#F9FAFB"
+
+    SALARY_COLOR = "#16A34A"
+
+    # ============================================================
+    # Detail panel
+    # ============================================================
+
+    DETAIL_PAD_X = 18
+
+    # Cỡ chữ nội dung: mặc định (Quyền lợi / Liên hệ) và lớn hơn một chút
+    # (Mô tả / Yêu cầu / Thông số).
+    HTML_FONT_SIZE = 10
+    HTML_FONT_SIZE_LARGE = 14
+
+    # Khoảng cách (trên, dưới) mỗi dòng của "Thông số": thoáng hơn để
+    # danh sách dài không bị dính / nhầm dòng.
+    SPEC_LINE_GAP = (6, 8)
+
+    META_ICONS = {
+        "company": "🏢",
+        "location": "📍",
+        "address": "🏠",
+        "dates": "📅",
+    }
 
     # ============================================================
     # Constructor
@@ -78,7 +270,7 @@ class MainWindow:
     # ============================================================
 
     def _configure_window(self):
-        self.root.title("App")
+        self.root.title("Job Crawler")
 
         self.root.resizable(True, True)
 
@@ -212,7 +404,7 @@ class MainWindow:
         self._build_content()
 
     # ============================================================
-    # Content — 70 / 30 split between Left and Right panels
+    # Content — 60 / 40 split between Left and Right panels
     # ============================================================
 
     def _build_content(self):
@@ -229,21 +421,22 @@ class MainWindow:
         )
 
         # --------------------------------------------------------
-        # 70 / 30 split
+        # 60 / 40 split
         #
-        # weight 7 : weight 3 = 70 : 30
+        # weight 60 : 40 + cùng uniform group -> tỉ lệ cố định,
+        # không bị minsize hay nội dung bên trong làm lệch.
         # --------------------------------------------------------
 
         self.content.grid_columnconfigure(
             0,
-            weight=7,
-            minsize=620
+            weight=round(self.LEFT_RATIO * 100),
+            uniform="split"
         )
 
         self.content.grid_columnconfigure(
             1,
-            weight=3,
-            minsize=320
+            weight=round(self.RIGHT_RATIO * 100),
+            uniform="split"
         )
 
         self.content.grid_rowconfigure(
@@ -255,7 +448,7 @@ class MainWindow:
         self._build_right_panel()
 
     # ============================================================
-    # Left Panel (~70%)
+    # Left Panel (~60%)
     #
     # Row 0 = Toolbar (Crawl / Backup / Search)
     # Row 1 = Data table
@@ -620,6 +813,12 @@ class MainWindow:
             self.on_job_selected
         )
 
+        # Double-click a job -> open its original URL in the browser.
+        self.tree.bind(
+            "<Double-1>",
+            self.on_job_double_click
+        )
+
         self._build_state_overlay()
 
     # ============================================================
@@ -869,7 +1068,7 @@ class MainWindow:
         )
 
     # ============================================================
-    # Right Panel (~30%)
+    # Right Panel (~40%)
     #
     # Runs the full height of the window. Pure JD viewer only —
     # no search box, no buttons, no toolbar of any kind here.
@@ -891,29 +1090,10 @@ class MainWindow:
             padx=(5, 0)
         )
 
-        # --------------------------------------------------------
-        # Responsive rows
-        #
-        # 0 = header            1 = separator
-        # 2 = "Job Description" heading, 3 = Job Description text
-        # 4 = "Requirements" heading,    5 = Requirements text
-        #
-        # Rows 3 and 5 share one uniform group, so both text boxes
-        # always get the same height.
-        # --------------------------------------------------------
-
-        for row in (0, 1, 2, 4):
-            self.right_panel.grid_rowconfigure(
-                row,
-                weight=0
-            )
-
-        for row in (3, 5):
-            self.right_panel.grid_rowconfigure(
-                row,
-                weight=1,
-                uniform="jd_sections"
-            )
+        self.right_panel.grid_rowconfigure(
+            0,
+            weight=1
+        )
 
         self.right_panel.grid_columnconfigure(
             0,
@@ -921,36 +1101,110 @@ class MainWindow:
         )
 
         # --------------------------------------------------------
-        # JD Header
+        # Một thanh cuộn duy nhất cho toàn bộ cột chi tiết.
+        # Bên trong xếp dọc: Header -> 5 khối nội dung.
+        #
+        # row 0     = header
+        # row 2-3   = Mô tả       row 4-5  = Yêu cầu
+        # row 6-7   = Thông số (bullet list)
+        # row 8-9   = Quyền lợi   row 10-11 = Liên hệ
         # --------------------------------------------------------
 
-        self.jd_header = ctk.CTkFrame(
+        self.detail_scroll = ctk.CTkScrollableFrame(
             self.right_panel,
             fg_color=self.WHITE,
             corner_radius=0
         )
 
-        self.jd_header.grid(
+        self.detail_scroll.grid(
             row=0,
             column=0,
-            sticky="ew",
-            padx=18,
-            pady=(16, 0)
+            sticky="nsew",
+            padx=2,
+            pady=6
         )
 
-        self.jd_header.grid_columnconfigure(
+        self.detail_scroll.grid_columnconfigure(
             0,
             weight=1
         )
 
-        self.jd_title = ctk.CTkLabel(
-            self.jd_header,
+        self._wrap_width = 300
+
+        self._build_html_fonts()
+        self._build_detail_header()
+
+        self.desc_section = self._build_html_section(
+            row=2,
+            title="Mô tả công việc",
+            font_size=self.HTML_FONT_SIZE_LARGE
+        )
+
+        self.req_section = self._build_html_section(
+            row=4,
+            title="Yêu cầu ứng viên",
+            font_size=self.HTML_FONT_SIZE_LARGE
+        )
+
+        # Specifications: bullet list đơn giản trên nền trắng (không card).
+        self.spec_section = self._build_html_section(
+            row=6,
+            title="Thông tin khác",
+            card=False,
+            font_size=self.HTML_FONT_SIZE_LARGE,
+            line_gap=self.SPEC_LINE_GAP
+        )
+
+        self.benefits_section = self._build_html_section(
+            row=8,
+            title="Quyền lợi"
+        )
+
+        self.contact_section = self._build_html_section(
+            row=10,
+            title="Thông tin liên hệ"
+        )
+
+    # ============================================================
+    # A. Header (title / salary / meta / source + link)
+    # ============================================================
+
+    def _build_detail_header(self):
+        header = ctk.CTkFrame(
+            self.detail_scroll,
+            fg_color=self.WHITE,
+            corner_radius=0
+        )
+
+        header.grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=self.DETAIL_PAD_X,
+            pady=(10, 0)
+        )
+
+        header.grid_columnconfigure(
+            0,
+            weight=1
+        )
+
+        # Dùng tk.Label thay vì CTkLabel: CTkLabel + wraplength cố định
+        # hay bị canvas bên trong cắt mất chữ cuối dòng. tk.Label tự
+        # wrap theo đúng độ rộng thực tế của nó nên không bị cắt.
+        self.jd_title = tk.Label(
+            header,
             text="Select a job",
-            text_color=self.TEXT_PRIMARY,
-            font=("Segoe UI Semibold", 17),
+            bg=self.WHITE,
+            fg=self.TEXT_PRIMARY,
+            font=("Segoe UI Semibold", 20),
             anchor="w",
             justify="left",
-            wraplength=300
+            wraplength=self._wrap_width,
+            borderwidth=0,
+            highlightthickness=0,
+            padx=0,
+            pady=0
         )
 
         self.jd_title.grid(
@@ -959,82 +1213,218 @@ class MainWindow:
             sticky="ew"
         )
 
-        self.jd_meta = ctk.CTkLabel(
-            self.jd_header,
-            text="",
-            text_color=self.TEXT_SECONDARY,
-            font=("Segoe UI", 10),
-            anchor="w",
-            justify="left"
+        self.jd_title.bind(
+            "<Configure>",
+            self._on_title_resize
         )
 
-        self.jd_meta.grid(
+        header.bind(
+            "<Configure>",
+            self._on_header_resize
+        )
+
+        self.jd_salary = ctk.CTkLabel(
+            header,
+            text="",
+            text_color=self.SALARY_COLOR,
+            font=("Segoe UI Semibold", 12),
+            anchor="w"
+        )
+
+        self.jd_salary.grid(
             row=1,
             column=0,
             sticky="ew",
-            pady=(5, 0)
+            pady=(6, 0)
+        )
+
+        # Mỗi dòng meta = icon + text (company / location / address / dates)
+        self.jd_meta_rows = {}
+
+        for index, key in enumerate(self.META_ICONS, start=2):
+            label = ctk.CTkLabel(
+                header,
+                text="",
+                text_color=self.TEXT_SECONDARY,
+                font=("Segoe UI", 12),
+                anchor="w",
+                justify="left",
+                wraplength=self._wrap_width
+            )
+
+            label.grid(
+                row=index,
+                column=0,
+                sticky="ew",
+                pady=(4, 0)
+            )
+
+            self.jd_meta_rows[key] = label
+
+        source_row = ctk.CTkFrame(
+            header,
+            fg_color=self.WHITE,
+            corner_radius=0
+        )
+
+        source_row.grid(
+            row=2 + len(self.META_ICONS),
+            column=0,
+            sticky="w",
+            pady=(10, 0)
         )
 
         self.jd_source = ctk.CTkLabel(
-            self.jd_header,
+            source_row,
             text="",
             fg_color=self.TAG_BG,
             text_color=self.TAG_TEXT,
             corner_radius=6,
             padx=9,
             pady=4,
-            font=("Segoe UI Semibold", 9),
+            font=("Segoe UI Semibold", 12),
             anchor="w"
         )
 
         self.jd_source.grid(
-            row=2,
-            column=0,
-            sticky="w",
-            pady=(9, 0)
+            row=0,
+            column=0
         )
 
-        # --------------------------------------------------------
-        # Separator
-        # --------------------------------------------------------
+        self.jd_open_button = ctk.CTkButton(
+            source_row,
+            text="Mở link gốc ↗",
+            width=110,
+            height=26,
+            corner_radius=6,
+            fg_color=self.PRIMARY,
+            hover_color=self.PRIMARY_HOVER,
+            font=("Segoe UI Semibold", 12),
+            command=self.on_open_selected_url,
+            state="disabled"
+        )
+
+        self.jd_open_button.grid(
+            row=0,
+            column=1,
+            padx=(8, 0)
+        )
 
         separator = ctk.CTkFrame(
-            self.right_panel,
+            header,
             height=1,
             fg_color=self.BORDER
         )
 
         separator.grid(
-            row=1,
+            row=3 + len(self.META_ICONS),
             column=0,
             sticky="ew",
-            padx=18,
-            pady=(15, 0)
+            pady=(14, 0)
         )
 
-        # --------------------------------------------------------
-        # Two text sections
-        # --------------------------------------------------------
+    # ============================================================
+    # B. Specifications (bullet list, nằm sau Yêu cầu)
+    # ============================================================
 
-        self.jd_text = self._build_text_section(
-            row=2,
-            title="Job Description"
-        )
+    def _render_specifications(self, specifications):
+        items = []
 
-        self.req_text = self._build_text_section(
-            row=4,
-            title="Requirements",
-            last=True
-        )
+        if isinstance(specifications, dict):
+            items = [
+                (str(key), " ".join(str(value).split()))
+                for key, value in specifications.items()
+                if value not in (None, "")
+            ]
 
-    def _build_text_section(self, row, title, last=False):
-        """Heading + read-only text box with its own scrollbar."""
+        if not items:
+            self._set_html_section(self.spec_section, "")
+            return
+
+        html = "<ul>" + "".join(
+            f"<li><b>{escape(key)}:</b> {escape(value)}</li>"
+            for key, value in items
+        ) + "</ul>"
+
+        self._set_html_section(self.spec_section, html)
+
+    # ============================================================
+    # C/D. HTML sections (Mô tả / Yêu cầu / Quyền lợi / Liên hệ)
+    # ============================================================
+
+    def _build_html_fonts(self):
+        """Tạo sẵn bộ font cho từng cỡ chữ (thường / đậm / nghiêng / tiêu đề)."""
+
+        family = "Segoe UI"
+
+        self._font_sets = {}
+
+        for size in (self.HTML_FONT_SIZE, self.HTML_FONT_SIZE_LARGE):
+            self._font_sets[size] = {
+                "body": tkfont.Font(
+                    family=family,
+                    size=size
+                ),
+                "bold": tkfont.Font(
+                    family=family,
+                    size=size,
+                    weight="bold"
+                ),
+                "italic": tkfont.Font(
+                    family=family,
+                    size=size,
+                    slant="italic"
+                ),
+                "heading": tkfont.Font(
+                    family=family,
+                    size=size + 1,
+                    weight="bold"
+                ),
+            }
+
+    def _configure_html_tags(self, text, fonts):
+        text.tag_configure("bold", font=fonts["bold"])
+        text.tag_configure("italic", font=fonts["italic"])
+        text.tag_configure("heading", font=fonts["heading"])
+        text.tag_configure("underline", underline=True)
+
+        for depth in (1, 2, 3):
+            left = 6 + 16 * depth
+
+            text.tag_configure(
+                f"indent{depth}",
+                lmargin1=left,
+                lmargin2=left + 14
+            )
+
+    def _build_html_section(
+        self,
+        row,
+        title,
+        card=True,
+        font_size=None,
+        line_gap=None
+    ):
+        """Heading + tk.Text tự co giãn chiều cao (không có thanh cuộn riêng).
+
+        card=True : nội dung nằm trong khung nền xám nhạt có viền.
+        card=False: nội dung hiển thị thẳng trên nền trắng chung của trang.
+        font_size : cỡ chữ nội dung (mặc định HTML_FONT_SIZE).
+        line_gap  : (spacing1, spacing3) khoảng cách trên/dưới mỗi dòng
+                    logic, nếu muốn khác mặc định.
+        """
+
+        body_bg = self.JD_BG if card else self.WHITE
+        fonts = self._font_sets[font_size or self.HTML_FONT_SIZE]
+
+        if line_gap is None:
+            line_gap = (1, 6) if card else (3, 4)
 
         heading = ctk.CTkLabel(
-            self.right_panel,
+            self.detail_scroll,
             text=title,
             text_color=self.TEXT_PRIMARY,
-            font=("Segoe UI Semibold", 11),
+            font=("Segoe UI Semibold", 18),     # chỉnh cỡ chữ của yêu cầu / mô tả công việc / thông tin khác
             anchor="w"
         )
 
@@ -1042,29 +1432,24 @@ class MainWindow:
             row=row,
             column=0,
             sticky="ew",
-            padx=18,
-            pady=(13, 7)
+            padx=self.DETAIL_PAD_X,
+            pady=(14, 6)
         )
 
         container = ctk.CTkFrame(
-            self.right_panel,
-            fg_color=self.JD_BG,
-            corner_radius=8,
-            border_width=1,
+            self.detail_scroll,
+            fg_color=body_bg,
+            corner_radius=8 if card else 0,
+            border_width=1 if card else 0,
             border_color=self.BORDER_LIGHT
         )
 
         container.grid(
             row=row + 1,
             column=0,
-            sticky="nsew",
-            padx=18,
-            pady=(0, 16 if last else 0)
-        )
-
-        container.grid_rowconfigure(
-            0,
-            weight=1
+            sticky="ew",
+            padx=self.DETAIL_PAD_X,
+            pady=(0, 6)
         )
 
         container.grid_columnconfigure(
@@ -1075,55 +1460,115 @@ class MainWindow:
         text = tk.Text(
             container,
             wrap="word",
-            bg=self.JD_BG,
+            bg=body_bg,
             fg=self.TEXT_PRIMARY,
-            insertbackground=self.TEXT_PRIMARY,
             relief="flat",
             borderwidth=0,
             highlightthickness=0,
-            font=("Segoe UI", 10),
-            padx=14,
-            pady=12,
-            spacing1=2,
+            font=fonts["body"],
+            padx=14 if card else 0,
+            pady=10 if card else 2,
+            spacing1=line_gap[0],
             spacing2=2,
-            spacing3=6
+            spacing3=line_gap[1],
+            height=1,
+            cursor="arrow"
         )
 
         text.grid(
             row=0,
             column=0,
-            sticky="nsew"
+            sticky="ew",
+            padx=1 if card else 0,
+            pady=1 if card else 0
         )
 
-        scrollbar = ttk.Scrollbar(
-            container,
-            orient="vertical",
-            command=text.yview,
-            style="Vertical.TScrollbar"
-        )
+        self._configure_html_tags(text, fonts)
+        self._bind_auto_height(text)
 
-        scrollbar.grid(
-            row=0,
-            column=1,
-            sticky="ns",
-            padx=(0, 3),
-            pady=3
-        )
+        text.configure(state="disabled")
+
+        return {
+            "heading": heading,
+            "container": container,
+            "text": text
+        }
+
+    def _bind_auto_height(self, text):
+        """Đổi chiều rộng -> tính lại số dòng hiển thị -> chỉnh height."""
+
+        last_width = {"value": 0}
+
+        def on_configure(event):
+            if event.width != last_width["value"]:
+                last_width["value"] = event.width
+                self._fit_text_height(text)
+
+        text.bind("<Configure>", on_configure)
+
+    def _fit_text_height(self, text):
+        text.update_idletasks()
+
+        result = text.count("1.0", "end", "ypixels")
+        pixels = result[0] if result else 0
+
+        line_height = tkfont.Font(
+            font=text.cget("font")
+        ).metrics("linespace")
 
         text.configure(
-            yscrollcommand=scrollbar.set,
-            state="disabled"
+            height=max(1, math.ceil(pixels / line_height))
         )
 
-        return text
-
     @staticmethod
-    def _set_text(widget, content):
-        widget.configure(state="normal")
-        widget.delete("1.0", "end")
-        widget.insert("1.0", content)
-        widget.configure(state="disabled")
-        widget.yview_moveto(0)
+    def _to_html(content):
+        """Nội dung đã là HTML thì giữ nguyên; text thường thì escape + giữ xuống dòng."""
+
+        content = (content or "").strip()
+
+        if not content:
+            return ""
+
+        if re.search(r"<[a-zA-Z/][^>]*>", content):
+            return content
+
+        return escape(content).replace("\n", "<br>")
+
+    def _set_html_section(self, section, content, placeholder=None):
+        html = self._to_html(content) or self._to_html(placeholder)
+
+        if not html:
+            section["heading"].grid_remove()
+            section["container"].grid_remove()
+            return
+
+        section["heading"].grid()
+        section["container"].grid()
+
+        HtmlTextRenderer.render(section["text"], html)
+
+        self.root.after_idle(
+            self._fit_text_height,
+            section["text"]
+        )
+
+    # ============================================================
+    # Resize (wraplength tự co theo độ rộng thực của widget)
+    # ============================================================
+
+    def _on_title_resize(self, event):
+        # Wrap đúng bằng độ rộng label đang có -> không bao giờ tràn/cắt chữ.
+        width = max(100, event.width)
+
+        if int(self.jd_title.cget("wraplength")) != width:
+            self.jd_title.configure(wraplength=width)
+
+    def _on_header_resize(self, event):
+        # CTkLabel có padding nội bộ -> chừa dư một chút để không mất ký tự.
+        width = max(120, event.width - 16)
+
+        for label in self.jd_meta_rows.values():
+            label.configure(wraplength=width)
 
     # ============================================================
     # Real Data (MongoDB)
@@ -1189,7 +1634,15 @@ class MainWindow:
             "posted_at": self._fmt_date(doc.get("posted_at")),
             "expire_date": self._fmt_date(doc.get("expired_at")),
             "description": doc.get("description") or "",
-            "requirements": doc.get("requirements") or ""
+            "requirements": doc.get("requirements") or "",
+            "address": doc.get("address") or "",
+            "salary": doc.get("salary") or "",
+            "benefits": doc.get("benefits") or "",
+            "contact": doc.get("contact") or "",
+            "specifications": doc.get("specifications") or {},
+            "url": doc.get("url") or "",
+            "posted_at_raw": doc.get("posted_at"),
+            "expired_at_raw": doc.get("expired_at")
         }
 
     # ============================================================
@@ -1288,6 +1741,93 @@ class MainWindow:
             selection[0]
         )
 
+    @staticmethod
+    def _fmt_date_range(start, end):
+        if not isinstance(start, datetime) and not isinstance(end, datetime):
+            return ""
+
+        return (
+            f"{MainWindow._fmt_date(start)} - "
+            f"{MainWindow._fmt_date(end)}"
+        )
+
+    def _set_optional_label(self, label, text):
+        if text:
+            label.configure(text=text)
+            label.grid()
+        else:
+            label.grid_remove()
+
+    def _set_meta_row(self, key, value):
+        label = self.jd_meta_rows[key]
+
+        if value:
+            label.configure(
+                text=f"{self.META_ICONS[key]}  {value}"
+            )
+            label.grid()
+        else:
+            label.grid_remove()
+
+    def _render_header(self, job):
+        self.jd_title.configure(
+            text=job.get("title") or "(Không có tiêu đề)"
+        )
+
+        self._set_optional_label(
+            self.jd_salary,
+            job.get("salary")
+        )
+
+        self._set_meta_row("company", job.get("company"))
+        self._set_meta_row("location", job.get("location"))
+        self._set_meta_row("address", job.get("address"))
+        self._set_meta_row(
+            "dates",
+            self._fmt_date_range(
+                job.get("posted_at_raw"),
+                job.get("expired_at_raw")
+            )
+        )
+
+        self.jd_source.configure(
+            text=job.get("source") or "unknown"
+        )
+
+        self.jd_open_button.configure(
+            state="normal" if job.get("url") else "disabled"
+        )
+
+    def _render_sections(self, job):
+        self._set_html_section(
+            self.desc_section,
+            job.get("description"),
+            placeholder="(Không có mô tả công việc)"
+        )
+
+        self._set_html_section(
+            self.req_section,
+            job.get("requirements"),
+            placeholder="(Không có yêu cầu)"
+        )
+
+        # Quyền lợi / Liên hệ: không có dữ liệu thì ẩn luôn cả khối.
+        self._set_html_section(
+            self.benefits_section,
+            job.get("benefits")
+        )
+
+        self._set_html_section(
+            self.contact_section,
+            job.get("contact")
+        )
+
+    def _scroll_details_to_top(self):
+        canvas = getattr(self.detail_scroll, "_parent_canvas", None)
+
+        if canvas is not None:
+            canvas.yview_moveto(0)
+
     def show_job_details(self, job_id):
         job = next(
             (
@@ -1303,40 +1843,64 @@ class MainWindow:
 
         self.selected_job = job
 
-        self.jd_title.configure(
-            text=job["title"] or "(Không có tiêu đề)"
+        self._render_header(job)
+        self._render_specifications(job.get("specifications"))
+        self._render_sections(job)
+        self._scroll_details_to_top()
+
+    def on_open_selected_url(self):
+        url = (
+            (self.selected_job or {}).get("url") or ""
+        ).strip()
+
+        if url:
+            webbrowser.open_new_tab(url)
+
+    def on_job_double_click(self, event=None):
+        """Open the selected job URL in the default browser."""
+        item_id = self.tree.identify_row(event.y) if event else None
+
+        if not item_id:
+            selection = self.tree.selection()
+            item_id = selection[0] if selection else None
+
+        if not item_id:
+            return
+
+        job = next(
+            (item for item in self.jobs if item["id"] == str(item_id)),
+            None
         )
 
-        self.jd_meta.configure(
-            text=(
-                f"{job['company']}  •  "
-                f"{job['location']}"
-            )
-        )
+        if not job:
+            return
 
-        self.jd_source.configure(
-            text=job["source"]
-        )
-
-        self._set_text(
-            self.jd_text,
-            job["description"] or "(Không có mô tả công việc)"
-        )
-
-        self._set_text(
-            self.req_text,
-            job["requirements"] or "(Không có yêu cầu)"
-        )
+        url = (job.get("url") or "").strip()
+        if url:
+            webbrowser.open_new_tab(url)
 
     def _clear_details(self):
         self.selected_job = None
 
         self.jd_title.configure(text="Select a job")
-        self.jd_meta.configure(text="")
         self.jd_source.configure(text="")
 
-        self._set_text(self.jd_text, "")
-        self._set_text(self.req_text, "")
+        self.jd_salary.grid_remove()
+
+        for label in self.jd_meta_rows.values():
+            label.grid_remove()
+
+        self.jd_open_button.configure(state="disabled")
+
+        self._render_specifications(None)
+
+        for section in (
+            self.desc_section,
+            self.req_section,
+            self.benefits_section,
+            self.contact_section
+        ):
+            self._set_html_section(section, "")
 
     # ============================================================
     # Search
