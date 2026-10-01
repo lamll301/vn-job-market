@@ -31,5 +31,5 @@ def run_crawler() -> None:
         print(f"\n[X] Đã xảy ra lỗi: {exc}")
 
 if __name__ == "__main__":
-    run_ui()
-    # run_crawler()
+    # run_ui()
+    run_crawler()

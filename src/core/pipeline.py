@@ -101,25 +101,41 @@ class CrawlPipeline:
 
     def _filter_new(self, jobs: list[Job]) -> list[Job]:
         """Batch-dedup one listing page's jobs against MongoDB in a
-        single query, instead of one round trip per job."""
+        single query. A job already in DB is skipped only if it is
+        complete; jobs missing description/requirements are crawled again."""
         if not jobs:
             return []
 
         source_ids = [j.source_id for j in jobs]
-        existing_ids = {
-            doc["source_id"]
-            for doc in self.repository.collection.find(
-                {"source": jobs[0].source, "source_id": {"$in": source_ids}},
-                {"source_id": 1},
-            )
-        }
+        complete_ids: set[str] = set()
+        incomplete_count = 0
 
-        new_jobs = [j for j in jobs if j.source_id not in existing_ids]
+        for doc in self.repository.collection.find(
+            {"source": jobs[0].source, "source_id": {"$in": source_ids}},
+            {"source_id": 1, "description": 1, "requirements": 1},
+        ):
+            if self._is_complete(doc):
+                complete_ids.add(doc["source_id"])
+            else:
+                incomplete_count += 1
+
+        to_crawl = [j for j in jobs if j.source_id not in complete_ids]
         print(
             f"    [{jobs[0].source}] dedup: {len(jobs)} listed, "
-            f"{len(existing_ids)} already in DB, {len(new_jobs)} new"
+            f"{len(complete_ids)} complete in DB, "
+            f"{incomplete_count} incomplete (re-crawl), "
+            f"{len(to_crawl) - incomplete_count} new"
         )
-        return new_jobs
+        return to_crawl
+
+    @staticmethod
+    def _is_complete(doc: dict) -> bool:
+        """A stored job counts as complete only if both description and
+        requirements are non-empty (missing, None and blank all fail)."""
+        return all(
+            str(doc.get(field) or "").strip()
+            for field in ("description", "requirements")
+        )
 
     async def _consume(self, queue: "asyncio.Queue[Optional[Job]]", worker_id: int) -> None:
         while True:

@@ -40,6 +40,20 @@ class VietnamWorksParser:
         "performance_outcome_at_event",
         "performance_as_of",
         "below_target_type",
+        # IDs: the matching *_name field is already in specifications
+        "job_level_id",
+        "job_function_id",
+        "job_group_function_id",
+        "job_location_id",
+        "working_location",
+        "company_id",
+        # changes over time / not useful
+        "is_salary_hidden",
+        "job_age_hours",
+        # promotion / ranking internals
+        "service_code",
+        "service_names",
+        "topPriorityType",
     }
 
     # Friendly Vietnamese labels for known fields. A key that isn't
@@ -56,15 +70,6 @@ class VietnamWorksParser:
         "headcount": "Số lượng tuyển",
         "company_industry": "Ngành công ty",
         "salary_range": "Khoảng lương",
-        "is_salary_hidden": "Ẩn lương",
-        "job_age_hours": "Đăng cách đây (giờ)",
-        "job_level_id": "Mã cấp bậc",
-        "job_function_id": "Mã ngành nghề",
-        "job_group_function_id": "Mã lĩnh vực",
-        "job_location_id": "Mã địa điểm",
-        "working_location": "Mã địa điểm làm việc",
-        "company_id": "Mã công ty",
-        "service_names": "Dịch vụ",
     }
 
     def parse(self, data: dict) -> list[Job]:

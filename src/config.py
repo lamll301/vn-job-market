@@ -13,6 +13,7 @@ if not MONGODB_DATABASE:
     raise ValueError("MONGODB_DATABASE is not configured")
 
 # VietnamWorks
+# https://www.vietnamworks.com/viec-lam?l=2.4.5&g=5&j=35.28.27.31.25.29.36.34.30.33.26.32.37
 VIETNAMWORKS_SEARCH_URL = "https://ms.vietnamworks.com/job-search/v1.0/search"
 VIETNAMWORKS_SEARCHES = {
     "it": {
@@ -62,6 +63,7 @@ VIETNAMWORKS_SEARCHES = {
     }
 }
 # CareerLink
+# https://www.careerlink.vn/tim-viec-lam-tai/hai-phong/HP?category_ids=19%2C130
 CAREERLINK_BASE_URL = "https://www.careerlink.vn"
 CAREERLINK_SEARCHES = {
     "it": {
@@ -70,9 +72,9 @@ CAREERLINK_SEARCHES = {
             # 130     # CNTT - Phần cứng, mạng
         ],
         "province_codes": [
-            "HP", 
-            "HN",
-            # "HCM",
+            # "HP", 
+            # "HN",
+            "HCM",
             # "DN",
         ],
     },

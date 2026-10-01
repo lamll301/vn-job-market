@@ -1197,7 +1197,7 @@ class MainWindow:
             text="Select a job",
             bg=self.WHITE,
             fg=self.TEXT_PRIMARY,
-            font=("Segoe UI Semibold", 20),
+            font=("Segoe UI Semibold", 22),
             anchor="w",
             justify="left",
             wraplength=self._wrap_width,
@@ -1509,15 +1509,13 @@ class MainWindow:
     def _fit_text_height(self, text):
         text.update_idletasks()
 
-        result = text.count("1.0", "end", "ypixels")
-        pixels = result[0] if result else 0
+        # Đếm trực tiếp số dòng hiển thị thực tế (đã tính cả tự động xuống dòng / word wrap)
+        result = text.count("1.0", "end-1c", "displaylines")
+        lines = result[0] if result else 1
 
-        line_height = tkfont.Font(
-            font=text.cget("font")
-        ).metrics("linespace")
-
+        # Gán số dòng chính xác cho ô Text
         text.configure(
-            height=max(1, math.ceil(pixels / line_height))
+            height=max(1, lines)
         )
 
     @staticmethod
