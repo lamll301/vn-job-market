@@ -198,7 +198,7 @@ class MainWindow:
     PAGE_SIZE = 20
 
     # Word wrap cho các cột trong bảng
-    WRAP_COLUMNS = ("title", "company", "location")
+    WRAP_COLUMNS = ("title", "company", "salary", "location")
     CELL_PADDING = 16
     MIN_ROW_HEIGHT = 40
 
@@ -219,10 +219,24 @@ class MainWindow:
         "startswith": "Bắt đầu bằng",
         "endswith": "Kết thúc bằng",
     }
+    # Sort theo header: click lần 1 tăng dần, lần 2 giảm dần, lần 3 về mặc định
+    SORT_COLUMNS = ("title", "company", "salary", "posted_at", "expire_date")
+    SORT_DEFAULT = ("posted_at", "desc")   # mới đăng nhất lên đầu
+    SORT_IDLE = "⇅"
+    SORT_ASC = "▲"
+    SORT_DESC = "▼"
+    USD_TO_VND = 25000                      # chỉ để so sánh lương USD / VND
+    SALARY_UNITS = {
+        "trieu": 1e6, "tr": 1e6, "m": 1e6,
+        "nghin": 1e3, "ngan": 1e3, "k": 1e3,
+        "ty": 1e9, "ti": 1e9, "b": 1e9,
+    }
+
+    SEARCH_BORDER = "#D1D5DB"   # viền ô search lúc bình thường
     FILTER_ACTIVE = "#1D4ED8"   # xanh dương đậm khi cột đang bị lọc
     HOVER_BG = "#F3F4F6"
     ICON_IDLE = "▾"
-    ICON_ACTIVE = "▼"
+    ICON_ACTIVE = "●"   # lọc đang bật (khác ▲▼ của sort)
     ICON_WIDTH = 20
     DEFAULT_HEADER_HEIGHT = 26
 
@@ -639,6 +653,24 @@ class MainWindow:
             font=("Segoe UI", 10)
         )
 
+        self.search_entry.configure(border_color=self.SEARCH_BORDER)
+
+        # Focus -> viền xanh dương, rời focus -> trả về xám nhẹ
+        self.search_entry.bind(
+            "<FocusIn>",
+            lambda e: self.search_entry.configure(
+                border_color=self.PRIMARY
+            ),
+            add="+"
+        )
+        self.search_entry.bind(
+            "<FocusOut>",
+            lambda e: self.search_entry.configure(
+                border_color=self.SEARCH_BORDER
+            ),
+            add="+"
+        )
+
         self.search_entry.grid(
             row=0,
             column=3,
@@ -726,6 +758,7 @@ class MainWindow:
         columns = (
             "title",
             "company",
+            "salary",
             "location",
             "source",
             "posted_at",
@@ -765,7 +798,7 @@ class MainWindow:
         )
 
         self.tree.configure(
-            yscrollcommand=self.table_scrollbar.set
+            yscrollcommand=self._on_tree_yscroll
         )
 
         # --------------------------------------------------------
@@ -775,6 +808,7 @@ class MainWindow:
         headings = {
             "title": "Job Title",
             "company": "Company",
+            "salary": "Salary",
             "location": "Location",
             "source": "Source",
             "posted_at": "Posted At",
@@ -782,7 +816,7 @@ class MainWindow:
         }
 
         for key, text in headings.items():
-            self.tree.heading(key, text=text)
+            self.tree.heading(key, text=text, anchor="w")
 
         # --------------------------------------------------------
         # Columns
@@ -805,6 +839,14 @@ class MainWindow:
         )
 
         self.tree.column(
+            "salary",
+            width=110,
+            minwidth=80,
+            stretch=True,
+            anchor="w"
+        )
+
+        self.tree.column(
             "location",
             width=120,
             minwidth=90,
@@ -817,23 +859,23 @@ class MainWindow:
             width=95,
             minwidth=80,
             stretch=False,
-            anchor="center"
+            anchor="w"
         )
 
         self.tree.column(
             "posted_at",
-            width=100,
-            minwidth=95,
+            width=110,
+            minwidth=105,
             stretch=False,
-            anchor="center"
+            anchor="w"
         )
 
         self.tree.column(
             "expire_date",
-            width=110,
-            minwidth=100,
+            width=120,
+            minwidth=115,
             stretch=False,
-            anchor="center"
+            anchor="w"
         )
 
         # --------------------------------------------------------
@@ -860,13 +902,23 @@ class MainWindow:
             self.on_job_selected
         )
 
-        # Double-click a job -> open its original URL in the browser.
-        self.tree.bind(
-            "<Double-1>",
-            self.on_job_double_click
-        )
+        # Chuột phải vào dòng -> context menu (mở link gốc / sao chép link)
+        self._build_row_menu()
 
         self._build_state_overlay()
+
+    def _on_tree_yscroll(self, first, last):
+        """Cập nhật thanh cuộn và ẩn hẳn khi không có gì để cuộn
+        (danh sách rỗng hoặc toàn bộ dòng đã vừa khung nhìn)."""
+        self.table_scrollbar.set(first, last)
+
+        needs_scroll = float(first) > 0.0 or float(last) < 1.0
+        is_shown = bool(self.table_scrollbar.winfo_manager())
+
+        if needs_scroll and not is_shown:
+            self.table_scrollbar.grid()
+        elif not needs_scroll and is_shown:
+            self.table_scrollbar.grid_remove()
 
     # ============================================================
     # Table state overlay (loading / empty / error)
@@ -911,7 +963,22 @@ class MainWindow:
             progress_color=self.PRIMARY
         )
 
-    def _show_state(self, message, loading=False):
+        # CTA ở empty state "không có kết quả": xóa tìm kiếm + mọi bộ lọc
+        self.state_action_button = ctk.CTkButton(
+            inner,
+            text="Xóa tìm kiếm & bộ lọc",
+            width=170,
+            height=32,
+            corner_radius=7,
+            fg_color=self.HOVER_BG,
+            hover_color=self.BORDER,
+            text_color="#374151",
+            font=("Segoe UI", 10),
+            command=self.clear_search_and_filters
+        )
+
+    def _show_state(self, message, loading=False, keep_header=False,
+                    show_clear=False):
         self.state_label.configure(text=message)
 
         if loading:
@@ -921,11 +988,31 @@ class MainWindow:
             self.state_progress.stop()
             self.state_progress.pack_forget()
 
-        self.state_overlay.place(
+        if show_clear:
+            self.state_action_button.pack(pady=(14, 0))
+        else:
+            self.state_action_button.pack_forget()
+
+        if keep_header:
+            # Chỉ phủ phần body: chừa lại hàng tiêu đề (cùng icon lọc)
+            # để người dùng còn bỏ lọc từng cột được.
+            header_h = self._measure_header_height()
+
+            y, height = header_h, -header_h
+        else:
+            y, height = 0, 0
+
+        # CTkFrame.place() cấm truyền height -> gọi place gốc của tkinter
+        # (relheight=1 + height âm = cao bằng khung trừ phần header).
+        tk.Place.place_configure(
+            self.state_overlay,
+            x=0,
+            y=y,
             relx=0,
             rely=0,
             relwidth=1,
-            relheight=1
+            relheight=1,
+            height=height
         )
 
     def _hide_state(self):
@@ -948,7 +1035,9 @@ class MainWindow:
             )
         elif not self.filtered_jobs:
             self._show_state(
-                "Không tìm thấy kết quả phù hợp."
+                "Không tìm thấy kết quả phù hợp.",
+                keep_header=True,
+                show_clear=True
             )
         else:
             self._hide_state()
@@ -1207,6 +1296,49 @@ class MainWindow:
             line_gap=self.SPEC_LINE_GAP
         )
 
+        self._build_detail_placeholder()
+
+    # ------------------------------------------------------------
+    # Placeholder khi chưa chọn tin nào (căn giữa khung chi tiết)
+    # ------------------------------------------------------------
+
+    def _build_detail_placeholder(self):
+        self.detail_placeholder = ctk.CTkFrame(
+            self.right_panel,
+            fg_color=self.WHITE,
+            corner_radius=0
+        )
+
+        ctk.CTkLabel(
+            self.detail_placeholder,
+            text="Chọn một tin tuyển dụng bên trái để xem chi tiết",
+            text_color=self.TEXT_MUTED,
+            font=("Segoe UI", 12),
+            justify="center",
+            wraplength=280
+        ).place(relx=0.5, rely=0.5, anchor="center")
+
+        self._show_detail_placeholder(True)
+
+    def _show_detail_placeholder(self, visible):
+        if visible:
+            # Chừa 4px quanh viền để không đè lên góc bo của khung.
+            # CTkFrame.place() cấm width/height -> dùng place gốc của tk.
+            tk.Place.place_configure(
+                self.detail_placeholder,
+                x=4,
+                y=4,
+                relx=0,
+                rely=0,
+                relwidth=1,
+                relheight=1,
+                width=-8,
+                height=-8
+            )
+            self.detail_placeholder.lift()
+        else:
+            self.detail_placeholder.place_forget()
+
     # ============================================================
     # A. Header (title / salary / meta / source + link)
     # ============================================================
@@ -1236,7 +1368,7 @@ class MainWindow:
         # wrap theo đúng độ rộng thực tế của nó nên không bị cắt.
         self.jd_title = tk.Label(
             header,
-            text="Select a job",
+            text="",
             bg=self.WHITE,
             fg=self.TEXT_PRIMARY,
             font=("Segoe UI Semibold", 22),
@@ -1734,12 +1866,14 @@ class MainWindow:
 
         for key in self.WRAP_COLUMNS:
             width = int(self.tree.column(key, "width")) - self.CELL_PADDING
-            wrapped[key], lines = self._wrap_text(job[key], width)
+            text = job[key] or ("—" if key == "salary" else "")
+            wrapped[key], lines = self._wrap_text(text, width)
             max_lines = max(max_lines, lines)
 
         values = (
             wrapped["title"],
             wrapped["company"],
+            wrapped["salary"],
             wrapped["location"],
             job["source"],
             job["posted_at"],
@@ -1812,6 +1946,7 @@ class MainWindow:
                 values=(
                     job["title"],
                     job["company"],
+                    job["salary"] or "—",
                     job["location"],
                     job["source"],
                     job["posted_at"],
@@ -1970,6 +2105,8 @@ class MainWindow:
 
         self.selected_job = job
 
+        self._show_detail_placeholder(False)
+
         self._render_header(job)
         self._render_specifications(job.get("specifications"))
         self._render_sections(job)
@@ -1983,33 +2120,106 @@ class MainWindow:
         if url:
             webbrowser.open_new_tab(url)
 
-    def on_job_double_click(self, event=None):
-        """Open the selected job URL in the default browser."""
-        item_id = self.tree.identify_row(event.y) if event else None
+    # ============================================================
+    # Context menu (chuột phải vào dòng)
+    # ============================================================
 
-        if not item_id:
-            selection = self.tree.selection()
-            item_id = selection[0] if selection else None
+    def _build_row_menu(self):
+        self._row_menu = None
 
-        if not item_id:
-            return
+        right_buttons = ["<Button-3>"]
 
-        job = next(
-            (item for item in self.jobs if item["id"] == str(item_id)),
+        # macOS: chuột phải là Button-2 (hoặc Ctrl + click)
+        if self.root.tk.call("tk", "windowingsystem") == "aqua":
+            right_buttons += ["<Button-2>", "<Control-Button-1>"]
+
+        for sequence in right_buttons:
+            self.tree.bind(sequence, self._on_row_right_click)
+
+        # Cuộn chuột -> đóng menu (click ra ngoài đã xử lý ở _on_root_click)
+        self.root.bind("<MouseWheel>", self._close_row_menu, add="+")
+        self.root.bind("<Button-4>", self._close_row_menu, add="+")
+        self.root.bind("<Button-5>", self._close_row_menu, add="+")
+
+    def _find_job(self, job_id):
+        return next(
+            (item for item in self.jobs if item["id"] == str(job_id)),
             None
         )
 
-        if not job:
+    def _on_row_right_click(self, event):
+        self._close_row_menu()
+
+        item_id = self.tree.identify_row(event.y)
+
+        if not item_id:
+            return "break"
+
+        # Tự chọn dòng được click chuột phải
+        self.tree.selection_set(item_id)
+        self.tree.focus(item_id)
+
+        job = self._find_job(item_id)
+        url = ((job or {}).get("url") or "").strip()
+        state = "normal" if url else "disabled"
+
+        menu = tk.Menu(
+            self.root,
+            tearoff=0,
+            font=("Segoe UI", 10),
+            bg=self.WHITE,
+            fg=self.TEXT_PRIMARY,
+            activebackground=self.SELECTED,
+            activeforeground=self.TEXT_PRIMARY,
+            bd=1,
+            relief="solid"
+        )
+
+        menu.add_command(
+            label="Mở link gốc",
+            state=state,
+            command=lambda: webbrowser.open_new_tab(url)
+        )
+        menu.add_command(
+            label="Sao chép đường dẫn",
+            state=state,
+            command=lambda: self._copy_to_clipboard(url)
+        )
+
+        self._row_menu = menu
+
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+        return "break"
+
+    def _close_row_menu(self, event=None):
+        menu = getattr(self, "_row_menu", None)
+
+        if menu is None:
             return
 
-        url = (job.get("url") or "").strip()
-        if url:
-            webbrowser.open_new_tab(url)
+        self._row_menu = None
+
+        try:
+            menu.unpost()
+            menu.destroy()
+        except tk.TclError:
+            pass
+
+    def _copy_to_clipboard(self, text):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.root.update_idletasks()
 
     def _clear_details(self):
         self.selected_job = None
 
-        self.jd_title.configure(text="Select a job")
+        self._show_detail_placeholder(True)
+
+        self.jd_title.configure(text="")
         self.jd_source.configure(text="")
 
         self.jd_salary.grid_remove()
@@ -2049,7 +2259,7 @@ class MainWindow:
             self.tree.heading(
                 key,
                 anchor="w",
-                command=lambda k=key: self._toggle_filter_popup(k)
+                command=lambda k=key: self._on_heading_click(k)
             )
 
             icon = tk.Label(
@@ -2076,6 +2286,41 @@ class MainWindow:
 
             self.filter_icons[key] = icon
 
+        # Sort: None = mặc định (SORT_DEFAULT); ngược lại (cột, "asc"|"desc")
+        self.sort_state = None
+        self.sort_icons = {}
+
+        for key in self.SORT_COLUMNS:
+            self.tree.heading(
+                key,
+                anchor="w",
+                command=lambda k=key: self._on_heading_click(k)
+            )
+
+            icon = tk.Label(
+                self.tree,
+                text=self.SORT_IDLE,
+                bg=self.WHITE,
+                fg=self.TEXT_MUTED,
+                font=("Segoe UI Symbol", 9),
+                cursor="hand2"
+            )
+
+            icon.bind(
+                "<Button-1>",
+                lambda e, k=key: self._toggle_sort(k)
+            )
+            icon.bind(
+                "<Enter>",
+                lambda e, w=icon: w.configure(bg=self.HOVER_BG)
+            )
+            icon.bind(
+                "<Leave>",
+                lambda e, w=icon: w.configure(bg=self.WHITE)
+            )
+
+            self.sort_icons[key] = icon
+
         # Icon luôn bám theo mép phải của cột khi kéo cột / resize
         for sequence in ("<Configure>", "<B1-Motion>", "<ButtonRelease-1>"):
             self.tree.bind(sequence, self._position_filter_icons, add="+")
@@ -2088,6 +2333,7 @@ class MainWindow:
         self.root.bind("<Button-1>", self._on_root_click, add="+")
         self.root.bind("<Configure>", self._on_root_configure, add="+")
 
+        self._update_sort_icons()
         self._position_filter_icons()
 
     def _measure_header_height(self):
@@ -2163,6 +2409,147 @@ class MainWindow:
                 width=self.ICON_WIDTH,
                 height=header_h - 2
             )
+
+        # Icon sort nằm bên trái icon lọc (cột không có lọc thì sát mép phải)
+        for key, icon in getattr(self, "sort_icons", {}).items():
+            right = self._column_left(key) + int(
+                self.tree.column(key, "width")
+            )
+            slots = 2 if key in self.filter_icons else 1
+
+            icon.place(
+                x=right - self.ICON_WIDTH * slots - 2,
+                y=1,
+                width=self.ICON_WIDTH,
+                height=header_h - 2
+            )
+
+    # --- Sort theo header ----------------------------------------
+
+    def _on_heading_click(self, key):
+        if key in self.SORT_COLUMNS:
+            self._toggle_sort(key)
+        else:
+            self._toggle_filter_popup(key)
+
+    def _effective_sort(self):
+        return self.sort_state or self.SORT_DEFAULT
+
+    def _toggle_sort(self, key):
+        """Tăng dần -> giảm dần -> mặc định."""
+        self._close_filter_popup()
+
+        state = self.sort_state
+
+        if state is None or state[0] != key:
+            self.sort_state = (key, "asc")
+        elif state[1] == "asc":
+            self.sort_state = (key, "desc")
+        else:
+            self.sort_state = None
+
+        self._update_sort_icons()
+        self.on_search()
+
+    def _update_sort_icons(self):
+        active_key, direction = self._effective_sort()
+
+        for key, icon in self.sort_icons.items():
+            if key != active_key:
+                icon.configure(text=self.SORT_IDLE, fg=self.TEXT_MUTED)
+            else:
+                icon.configure(
+                    text=(
+                        self.SORT_ASC if direction == "asc"
+                        else self.SORT_DESC
+                    ),
+                    fg=self.FILTER_ACTIVE
+                )
+
+    def _sort_value(self, job, key):
+        """Giá trị so sánh của một dòng; None = thiếu dữ liệu (luôn xếp cuối)."""
+        if key in self.DATE_COLUMNS:
+            value = job.get(self.DATE_COLUMNS[key])
+
+            try:
+                return value.timestamp() if value else None
+            except (AttributeError, OverflowError, OSError, ValueError):
+                return None
+
+        if key == "salary":
+            return self._parse_salary(job.get("salary"))
+
+        return self._normalize_text(job.get(key)) or None
+
+    def _sort_jobs(self, jobs):
+        key, direction = self._effective_sort()
+
+        keyed, missing = [], []
+
+        for job in jobs:
+            value = self._sort_value(job, key)
+            (missing if value is None else keyed).append((value, job))
+
+        keyed.sort(key=lambda pair: pair[0], reverse=(direction == "desc"))
+
+        # Dòng thiếu dữ liệu luôn nằm dưới cùng, dù tăng hay giảm
+        return [job for _, job in keyed] + [job for _, job in missing]
+
+    def _parse_salary(self, text):
+        """'14 triệu - 18 triệu' -> (14e6, 18e6) VND; 'Thương lượng' -> None."""
+        text = self._normalize_text(text)
+        text = re.sub(r"\([^)]*\)", " ", text)         # bỏ phần trong ngoặc
+        text = re.sub(r"\d+\s*thang", " ", text)       # '13 tháng lương'
+
+        if not re.search(r"\d", text):
+            return None
+
+        is_usd = "usd" in text or "$" in text
+
+        tokens = []
+
+        for number, unit in re.findall(
+            r"(\d[\d.,]*)\s*(trieu|tr|nghin|ngan|ty|ti|m|k|b)?(?![a-z])",
+            text
+        ):
+            number = number.rstrip(".,")
+
+            try:
+                if re.fullmatch(r"\d{1,3}(?:[.,]\d{3})+", number):
+                    value = float(re.sub(r"[.,]", "", number))
+                else:
+                    value = float(number.replace(",", "."))
+            except ValueError:
+                continue
+
+            tokens.append([value, unit or None])
+
+        if not tokens:
+            return None
+
+        # '15 - 20 triệu': số không có đơn vị lấy đơn vị của số đứng sau
+        carry = None
+
+        for token in reversed(tokens):
+            if token[1]:
+                carry = token[1]
+            else:
+                token[1] = carry
+
+        amounts = []
+
+        for value, unit in tokens:
+            if unit:
+                value *= self.SALARY_UNITS[unit]
+            elif not is_usd and value < 1000:
+                value *= 1e6          # '15 - 20' -> hiểu là triệu
+
+            if is_usd:
+                value *= self.USD_TO_VND
+
+            amounts.append(value)
+
+        return (min(amounts), max(amounts))
 
     def _update_filter_icons(self):
         for key, icon in self.filter_icons.items():
@@ -2737,14 +3124,24 @@ class MainWindow:
 
         window.after(20, entries[0].focus_force)
 
+    @staticmethod
+    def _clear_calendar_holder(holder):
+        """Xóa lịch và thu khung chứa về cỡ tối thiểu.
+
+        Tk giữ nguyên cỡ cũ của một frame khi mọi widget con bị xóa,
+        nên phải đặt lại width/height thì khoảng trống mới biến mất."""
+        for child in holder.winfo_children():
+            child.destroy()
+
+        holder.configure(width=1, height=1)
+
     def _toggle_date_calendar(self, which):
         fp = self._fp
 
         for name, holder in fp["holders"].items():
             was_open = bool(holder.winfo_children())
 
-            for child in holder.winfo_children():
-                child.destroy()
+            self._clear_calendar_holder(holder)
 
             if name != which or was_open:
                 continue
@@ -2761,14 +3158,17 @@ class MainWindow:
                 on_pick=lambda d, n=name: self._pick_date(n, d)
             ).pack(anchor="w", pady=(0, 6))
 
+        self._refit_filter_popup()
+
     def _pick_date(self, which, picked):
         fp = self._fp
 
         fp["vars"][which].set(self._format_date(picked))
         fp["error"].configure(text="")
 
-        for child in fp["holders"][which].winfo_children():
-            child.destroy()
+        self._clear_calendar_holder(fp["holders"][which])
+
+        self._refit_filter_popup()
 
     def _apply_date_preset(self, start, end):
         fp = self._fp
@@ -2923,6 +3323,35 @@ class MainWindow:
 
         window.geometry(f"+{x}+{y}")
 
+        if self._fp and self._fp.get("window") is window:
+            self._fp["origin"] = (x, y)
+
+    def _refit_filter_popup(self):
+        """Ép popup co/giãn lại theo nội dung hiện tại.
+
+        Bỏ kích thước cũ (geometry("")) để Toplevel không giữ chiều cao
+        lúc đang mở lịch; chỉ giữ lại vị trí, và đẩy lên nếu tràn đáy
+        màn hình."""
+        fp = self._fp
+
+        if not fp or not fp.get("origin"):
+            return
+
+        window = fp["window"]
+        x, y = fp["origin"]
+
+        window.geometry("")
+        window.update_idletasks()
+
+        overflow = y + window.winfo_reqheight() - (
+            window.winfo_screenheight() - 48
+        )
+
+        if overflow > 0:
+            y = max(0, y - overflow)
+
+        window.geometry(f"+{x}+{y}")
+
     def _render_filter_list(self):
         fp = self._fp
 
@@ -3047,6 +3476,8 @@ class MainWindow:
         self.on_search()
 
     def _on_root_click(self, event):
+        self._close_row_menu()
+
         if not self._fp:
             return
 
@@ -3062,8 +3493,12 @@ class MainWindow:
             index = int(column[1:]) - 1 if column else -1
             names = self.tree["columns"]
 
-            if 0 <= index < len(names) and names[index] in self.FILTER_COLUMNS:
-                return  # heading của cột lọc tự toggle
+            if (
+                0 <= index < len(names)
+                and names[index] in self.FILTER_COLUMNS
+                and names[index] not in self.SORT_COLUMNS
+            ):
+                return  # heading Location / Source vẫn tự toggle popup lọc
 
         self._close_filter_popup()
 
@@ -3116,6 +3551,16 @@ class MainWindow:
             for key in ("title", "company", "location", "source")
         )
 
+    def clear_search_and_filters(self):
+        """Reset ô Search + mọi filter ở header rồi nạp lại danh sách."""
+        self._close_filter_popup()
+
+        self.search_entry.delete(0, "end")
+        self.column_filters = {key: None for key in self.FILTER_COLUMNS}
+
+        self._update_filter_icons()
+        self.on_search()
+
     def on_search(self, event=None):
         keyword = (
             self.search_entry
@@ -3124,11 +3569,11 @@ class MainWindow:
             .lower()
         )
 
-        self.filtered_jobs = [
+        self.filtered_jobs = self._sort_jobs([
             job
             for job in self.jobs
             if self._matches_filters(job, keyword)
-        ]
+        ])
 
         self.current_page = 1
 
