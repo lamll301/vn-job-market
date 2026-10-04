@@ -10,8 +10,8 @@
 * Trong thư mục dự án, tìm file `.env.example`.
 * Copy file này và đổi tên thành `.env`.
 
-### Bước 3: Cài đặt các thư viện cần thiết
-1. Mở cửa sổ dòng lệnh (Terminal trên Mac/Linux hoặc Command Prompt / PowerShell trên Windows) tại thư mục của dự án.
+### Bước 3: Cài đặt các thư viện Python
+1. Mở cửa sổ dòng lệnh (Terminal trên Mac/Linux hoặc Command Prompt / PowerShell trên Windows) tại thư mục dự án.
 2. Gõ lệnh sau và nhấn **Enter** để tự động cài đặt tất cả thư viện có trong `requirements.txt`:
 
 ```bash
@@ -20,37 +20,172 @@ pip install -r requirements.txt
 
 ---
 
-## 2. Cấu hình Database (Lấy MONGODB_URI)
+## 2. MongoDB & Backup / Restore
 
-### Bước 1: Tạo tài khoản & Database miễn phí
-* Truy cập [MongoDB Atlas](https://www.mongodb.com/cloud/atlas) và đăng nhập bằng tài khoản Google.
-* Chọn gói **Free (M0)** và nhấn **Create** để tạo ứng dụng (chờ 1-2 phút).
+MongoDB dùng để lưu dữ liệu của ứng dụng.
 
-### Bước 2: Tạo Tên đăng nhập & Mật khẩu
-* Chọn mục **Database Access** ở menu bên trái -> Nhấn **Add New Database User**.
-* Nhập **Username** (ví dụ: `admin`) và nhập **Password** do bạn tự chọn.
-* **Lưu lại Username và Password này để sử dụng ở bước sau.**
-* Nhấn **Add User**.
+### 2.1. Cấu hình MongoDB Atlas
 
-### Bước 3: Mở quyền truy cập IP
-* Chọn mục **Network Access** ở menu bên trái -> Nhấn **Add IP Address**.
-* Nhấn vào nút **Allow Access From Anywhere** -> Nhấn **Confirm**.
+#### Bước 1: Tạo MongoDB Atlas
 
-### Bước 4: Sao chép chuỗi kết nối
-* Chọn mục **Database** ở menu bên trái -> Nhấn nút **Connect** ở khung Database vừa tạo.
-* Chọn mục **Drivers**.
-* Sao chép (copy) đoạn mã trong mục **Connection String**. Đoạn mã có dạng:
-  `mongodb+srv://<username>:<password>@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority`
+Truy cập [MongoDB Atlas](https://www.mongodb.com/cloud/atlas) và đăng nhập.
 
-### Bước 5: Điền mã vào file .env
-1. Mở file `.env`.
-2. Dán đoạn mã vừa sao chép vào sau dấu `=` của dòng `MONGODB_URI=`.
-3. Thay thế thông tin trong đoạn mã:
-   * Thay `<username>` bằng Tên đăng nhập đã tạo ở Bước 2.
-   * Thay `<password>` bằng Mật khẩu đã tạo ở Bước 2.
-     *(Lưu ý: Xóa bỏ cả hai ký tự `<` và `>`)*
+1. Tạo một Cluster mới.
+2. Có thể chọn gói **Free (M0)**.
+
+#### Bước 2: Tạo tài khoản Database
+
+Vào:
+
+**Database Access → Add New Database User**
+
+Tạo:
+
+* **Username**
+* **Password**
+
+Hãy lưu lại thông tin này.
+
+#### Bước 3: Cho phép kết nối
+
+Vào:
+
+**Network Access → Add IP Address**
+
+Chọn:
+
+**Allow Access From Anywhere → Confirm**
+
+#### Bước 4: Lấy Connection String
+
+Vào:
+
+**Database → Connect → Drivers**
+
+Copy Connection String có dạng:
+
+```text
+mongodb+srv://<username>:<password>@cluster0.xxxxx.mongodb.net/
+```
+
+#### Bước 5: Cấu hình ứng dụng
+
+Copy:
+
+```text
+.env.example
+```
+
+thành:
+
+```text
+.env
+```
+
+Mở `.env` và điền:
+
+```env
+MONGODB_URI=mongodb+srv://<username>:<password>@cluster0.xxxxx.mongodb.net/
+```
 
 ---
+
+### 2.2. Cài đặt MongoDB Database Tools
+
+Để sử dụng **Backup / Restore**, cần cài [MongoDB Database Tools](https://www.mongodb.com/try/download/database-tools)
+
+
+Chọn:
+
+* **Platform:** Windows x86_64
+* **Package:** msi
+
+Sau khi cài đặt, mở CMD và kiểm tra:
+
+```cmd
+mongodump --version
+```
+
+và:
+
+```cmd
+mongorestore --version
+```
+
+Nếu cả hai lệnh hiển thị phiên bản là đã cài đặt thành công.
+
+---
+
+### 2.3. Backup
+
+Trong ứng dụng, chọn:
+
+```text
+Backup
+```
+
+Hệ thống sẽ tự động tạo thư mục:
+
+```text
+backups/
+└── 20261004_174442/
+    └── recruitment_crawler/
+        ├── jobs.bson
+        └── jobs.metadata.json
+```
+
+Nếu xuất hiện:
+
+```text
+Database backup completed: backups\20261004_174442
+```
+
+thì Backup đã thành công.
+
+---
+
+### 2.4. Restore
+
+Để kiểm tra hoặc khôi phục Backup, sử dụng file:
+
+```text
+jobs.bson
+```
+
+Ví dụ:
+
+```text
+backups/20261004_174442/recruitment_crawler/jobs.bson
+```
+
+Mở CMD và chạy:
+
+```cmd
+mongorestore --uri="MONGODB_CONNECTION_STRING" --db=recruitment_crawler_test "PATH_TO_BACKUP\jobs.bson"
+```
+
+Ví dụ:
+
+```cmd
+mongorestore --uri="mongodb+srv://username:password@cluster0.xxxxx.mongodb.net/" --db=recruitment_crawler_test "d:\workspace\job-crawler\backups\20261004_174442\recruitment_crawler\jobs.bson"
+```
+
+Backup sẽ được khôi phục vào:
+
+```text
+recruitment_crawler_test
+└── jobs
+```
+
+> Nên Restore vào `recruitment_crawler_test` để kiểm tra trước, không ảnh hưởng đến Database đang sử dụng.
+
+Nếu xuất hiện:
+
+```text
+1102 document(s) restored successfully. 0 document(s) failed to restore.
+```
+
+thì Restore thành công.
 
 ## 3. Hướng Dẫn Cấu Hình Scraper (`config.py`)
 
@@ -89,4 +224,3 @@ Mỗi trang tuyển dụng sẽ quản lý tỉnh/thành phố và ngành nghề
   * **Chuỗi nhóm ngành (`category_family`):** Copy đoạn mã sau `category_family=`.
     * *Ví dụ:* `category_family: "r257~b258_b259"`
   * **Tham số lọc (`params`):** Giữ nguyên các tham số cố định thu được từ URL (`type_keyword`, `disable_auto_detect_type_keyword`, `sba`, `saturday_status`).
-

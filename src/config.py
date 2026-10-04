@@ -21,7 +21,7 @@ VIETNAMWORKS_SEARCHES = {
             28, # Hai Phong
             70, # Quoc te
             24, # Ha Noi
-            29, # Ho Chi Minh
+            # 29, # Ho Chi Minh
             # 17, # Da Nang
             # 15, # Can Tho
             # 3, # Ba Ria - Vung Tau

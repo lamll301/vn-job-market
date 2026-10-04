@@ -32,6 +32,9 @@ crawler/
 │   ├── models/                 # Job dataclass
 │   ├── database/               # MongoDB connection, repository, backup
 │   └── ui/                     # Tkinter UI cũ; không phải luồng chạy mặc định
+│       ├── components/
+│       ├── views/
+│       └── main_window.py
 ├── requirements.txt
 └── .env                        # Local secrets/config; không commit
 ```

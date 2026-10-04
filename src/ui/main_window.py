@@ -1,7 +1,8 @@
-import asyncio
 import calendar
 import math
+import os
 import re
+import subprocess
 import threading
 import tkinter as tk
 import unicodedata
@@ -14,6 +15,13 @@ from tkinter import font as tkfont
 from tkinter import ttk
 
 import customtkinter as ctk
+
+from ui.components.crawl_progress_dialog import (
+    CrawlProgressTheme,
+    CrawlResult,
+    CrawlSession,
+)
+
 
 class HtmlTextRenderer(HTMLParser):
     """Đổ HTML đơn giản vào tk.Text (không cần thư viện ngoài).
@@ -287,6 +295,14 @@ class MainWindow:
         "address": "🏠",
         "dates": "📅",
     }
+
+    # Crawl: logic + dialog tiến độ nằm ở components/crawl_progress_dialog.py
+    CANCEL_COLOR = "#B91C1C"
+
+    _crawl = None               # CrawlSession đang chạy (None = rảnh)
+    _backup_running = False     # đang chạy mongodump
+    _toast = None
+    _toast_after_id = None
 
     # ============================================================
     # Constructor
@@ -1392,11 +1408,6 @@ class MainWindow:
             self._on_title_resize
         )
 
-        header.bind(
-            "<Configure>",
-            self._on_header_resize
-        )
-
         self.jd_salary = ctk.CTkLabel(
             header,
             text="",
@@ -1413,24 +1424,38 @@ class MainWindow:
         )
 
         # Mỗi dòng meta = icon + text (company / location / address / dates)
+        # Dùng tk.Label (giống jd_title) thay vì CTkLabel: CTkLabel có
+        # chiều cao cố định + canvas bên trong nên địa chỉ dài bị cắt mất
+        # chữ cuối dòng / dòng cuối. tk.Label tự cao theo số dòng wrap.
         self.jd_meta_rows = {}
 
         for index, key in enumerate(self.META_ICONS, start=2):
-            label = ctk.CTkLabel(
+            label = tk.Label(
                 header,
                 text="",
-                text_color=self.TEXT_SECONDARY,
+                bg=self.WHITE,
+                fg=self.TEXT_SECONDARY,
                 font=("Segoe UI", 12),
                 anchor="w",
                 justify="left",
-                wraplength=self._wrap_width
+                wraplength=self._wrap_width,
+                borderwidth=0,
+                highlightthickness=0,
+                padx=0,
+                pady=0
             )
 
             label.grid(
                 row=index,
                 column=0,
                 sticky="ew",
-                pady=(4, 0)
+                pady=(8, 0)
+            )
+
+            # Wrap đúng bằng độ rộng label đang có -> không tràn/cắt chữ
+            label.bind(
+                "<Configure>",
+                self._on_meta_resize
             )
 
             self.jd_meta_rows[key] = label
@@ -1735,11 +1760,12 @@ class MainWindow:
         if int(self.jd_title.cget("wraplength")) != width:
             self.jd_title.configure(wraplength=width)
 
-    def _on_header_resize(self, event):
-        # CTkLabel có padding nội bộ -> chừa dư một chút để không mất ký tự.
-        width = max(120, event.width - 16)
+    def _on_meta_resize(self, event):
+        # Wrap đúng bằng độ rộng thực của từng dòng meta (company, địa chỉ...)
+        width = max(100, event.width)
+        label = event.widget
 
-        for label in self.jd_meta_rows.values():
+        if int(label.cget("wraplength")) != width:
             label.configure(wraplength=width)
 
     # ============================================================
@@ -3649,26 +3675,190 @@ class MainWindow:
     # ============================================================
 
     def on_crawl(self):
-        from core.run import run_all
+        if self._crawl is not None or self._backup_running:
+            return  # đang crawl/backup rồi, không cho chạy chồng
 
-        self.crawl_button.configure(state="disabled", text="Crawling...")
+        try:
+            from core.run import run_all
+        except Exception as exc:
+            self._show_toast(f"[X] Không nạp được module crawl: {exc}", "error")
+            return
 
+        close_filter = getattr(self, "_close_filter_popup", None)
+
+        if close_filter:
+            close_filter()
+
+        self._set_actions_enabled(False)
+
+        self._crawl = CrawlSession(
+            self.root,
+            job_factory=lambda: run_all(self.repository),
+            on_finished=self._on_crawl_finished,
+            theme=CrawlProgressTheme(
+                white=self.WHITE,
+                border=self.BORDER,
+                primary=self.PRIMARY,
+                text_primary=self.TEXT_PRIMARY,
+                text_secondary=self.TEXT_SECONDARY,
+                text_muted=self.TEXT_MUTED,
+                cancel=self.CANCEL_COLOR,
+            ),
+        )
+        self._crawl.start()
+
+    def _set_actions_enabled(self, enabled):
+        state = "normal" if enabled else "disabled"
+
+        self.crawl_button.configure(
+            state=state,
+            text="Crawl" if enabled else "Crawling..."
+        )
+
+        self.backup_button.configure(state=state)
+
+    # --- kết thúc crawl ----------------------------------------------
+
+    def _on_crawl_finished(self, result: CrawlResult):
+        self._crawl = None
+        self._set_actions_enabled(True)
+
+        if result.error:
+            print(f"[X] Lỗi khi crawl: {result.error}")
+            self._show_toast(
+                f"[X] Crawl gặp lỗi: {result.error}",
+                "error"
+            )
+        elif result.cancelled:
+            self._show_toast(
+                "[STOP] Đã dừng crawl theo yêu cầu "
+                f"(đã lưu {result.saved} tin mới)",
+                "warning"
+            )
+        elif result.stop:
+            self._show_toast(f"[STOP] {result.stop}", "warning")
+        else:
+            self._show_toast(
+                f"[OK] Đã cào xong {result.listed} tin tuyển dụng "
+                f"({result.new} tin mới)",
+                "success"
+            )
+
+        # Nạp lại bảng (kể cả khi lỗi/dừng: có thể đã lưu được một phần)
+        self.load_jobs()
+
+    # --- toast ----------------------------------------------------------
+
+    def _show_toast(self, message, kind="success"):
+        self._hide_toast()
+
+        colors = {
+            "success": "#166534",
+            "warning": "#92400E",
+            "error": "#991B1B",
+        }
+
+        toast = ctk.CTkFrame(
+            self.root,
+            fg_color=colors.get(kind, colors["success"]),
+            corner_radius=10
+        )
+
+        label = ctk.CTkLabel(
+            toast,
+            text=message,
+            text_color="#FFFFFF",
+            font=("Segoe UI Semibold", 11),
+            wraplength=420,
+            justify="left"
+        )
+
+        label.pack(padx=16, pady=10)
+
+        # Click vào toast để tắt ngay
+        for widget in (toast, label):
+            widget.bind("<Button-1>", lambda e: self._hide_toast())
+
+        toast.place(relx=1.0, rely=1.0, x=-24, y=-24, anchor="se")
+        toast.lift()
+
+        self._toast = toast
+        self._toast_after_id = self.root.after(
+            8000 if kind == "error" else 5000,
+            self._hide_toast
+        )
+
+    def _hide_toast(self):
+        if self._toast_after_id is not None:
+            self.root.after_cancel(self._toast_after_id)
+            self._toast_after_id = None
+
+        if self._toast is not None:
+            self._toast.destroy()
+            self._toast = None
+
+    # --- backup ---------------------------------------------------------
+
+    def on_backup(self):
+        if self._backup_running or self._crawl is not None:
+            return  # đang backup/crawl rồi, không cho chạy chồng
+
+        try:
+            from database.backup import backup_database
+        except Exception as exc:
+            self._show_toast(f"[X] Không nạp được module backup: {exc}", "error")
+            return
+
+        self._close_filter_popup()
+
+        self._backup_running = True
+        self._set_backup_busy(True)
+
+        # mongodump có thể chạy vài giây -> đưa sang thread riêng để UI không đơ
         def worker():
+            path, error = None, None
+
             try:
-                asyncio.run(run_all(self.repository))
-            except Exception as exc:
-                self.root.after(
-                    0,
-                    lambda exc=exc: print(f"[X] Lỗi khi crawl: {exc}")
+                path = backup_database()
+            except FileNotFoundError:
+                error = (
+                    "Không tìm thấy mongodump. "
+                    "Hãy cài MongoDB Database Tools và thêm vào PATH."
                 )
-            finally:
-                self.root.after(0, self._on_crawl_done)
+            except subprocess.CalledProcessError as exc:
+                # Không dùng str(exc): nó chứa cả MONGODB_URI (có mật khẩu)
+                error = (
+                    f"mongodump thất bại (mã lỗi {exc.returncode}). "
+                    "Kiểm tra lại kết nối / MONGODB_URI."
+                )
+            except Exception as exc:
+                error = str(exc)
+
+            self.root.after(0, lambda: self._on_backup_finished(path, error))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_crawl_done(self):
-        self.crawl_button.configure(state="normal", text="Crawl")
-        self.load_jobs()
+    def _set_backup_busy(self, busy):
+        self.backup_button.configure(
+            state="disabled" if busy else "normal",
+            text="Backup..." if busy else "Backup"
+        )
 
-    def on_backup(self):
-        print("Backup clicked")
+        # Backup xong mới cho crawl, tránh vừa ghi vừa sao lưu
+        self.crawl_button.configure(
+            state="disabled" if busy else "normal"
+        )
+
+    def _on_backup_finished(self, path, error):
+        self._backup_running = False
+        self._set_backup_busy(False)
+
+        if error:
+            print(f"[X] Backup thất bại: {error}")
+            self._show_toast(f"[X] Backup thất bại: {error}", "error")
+            return
+
+        location = os.path.abspath(path) if path else "thư mục backups"
+
+        print(f"[OK] Backup xong: {location}")
+        self._show_toast(f"[OK] Đã backup xong:\n{location}", "success")

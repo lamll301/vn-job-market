@@ -20,3 +20,4 @@ def backup_database():
     subprocess.run(command, check=True)
 
     print(f"Database backup completed: {backup_dir}")
+    return backup_dir
