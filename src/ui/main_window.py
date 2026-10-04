@@ -1,10 +1,13 @@
 import asyncio
+import calendar
 import math
 import re
 import threading
 import tkinter as tk
+import unicodedata
 import webbrowser
-from datetime import datetime
+from collections import Counter
+from datetime import date, datetime, timedelta
 from html import escape
 from html.parser import HTMLParser
 from tkinter import font as tkfont
@@ -193,6 +196,35 @@ class MainWindow:
     RIGHT_RATIO = 0.40
 
     PAGE_SIZE = 20
+
+    # Word wrap cho các cột trong bảng
+    WRAP_COLUMNS = ("title", "company", "location")
+    CELL_PADDING = 16
+    MIN_ROW_HEIGHT = 40
+
+    # Header filter (Location / Source)
+    FILTER_COLUMNS = (
+        "title", "company", "location", "source", "posted_at", "expire_date"
+    )
+    CHECKLIST_COLUMNS = ("location", "source")  # ít giá trị -> popup checklist
+    TEXT_COLUMNS = ("title", "company")         # nhiều giá trị -> gõ từ khóa
+
+    # cột ngày -> khoá ngày gốc (datetime) trong view model; lọc theo khoảng
+    DATE_COLUMNS = {
+        "posted_at": "posted_at_raw",
+        "expire_date": "expired_at_raw",
+    }
+    TEXT_CONDITIONS = {
+        "contains": "Chứa",
+        "startswith": "Bắt đầu bằng",
+        "endswith": "Kết thúc bằng",
+    }
+    FILTER_ACTIVE = "#1D4ED8"   # xanh dương đậm khi cột đang bị lọc
+    HOVER_BG = "#F3F4F6"
+    ICON_IDLE = "▾"
+    ICON_ACTIVE = "▼"
+    ICON_WIDTH = 20
+    DEFAULT_HEADER_HEIGHT = 26
 
     # ============================================================
     # Colors
@@ -758,7 +790,7 @@ class MainWindow:
 
         self.tree.column(
             "title",
-            width=230,
+            width=300,
             minwidth=170,
             stretch=True,
             anchor="w"
@@ -766,7 +798,7 @@ class MainWindow:
 
         self.tree.column(
             "company",
-            width=140,
+            width=200,
             minwidth=100,
             stretch=True,
             anchor="w"
@@ -790,19 +822,34 @@ class MainWindow:
 
         self.tree.column(
             "posted_at",
-            width=90,
-            minwidth=80,
+            width=100,
+            minwidth=95,
             stretch=False,
             anchor="center"
         )
 
         self.tree.column(
             "expire_date",
-            width=95,
-            minwidth=85,
+            width=110,
+            minwidth=100,
             stretch=False,
             anchor="center"
         )
+
+        # --------------------------------------------------------
+        # Word wrap state
+        # --------------------------------------------------------
+
+        self._row_font = tkfont.Font(family="Segoe UI", size=10)
+        self._row_height = self.MIN_ROW_HEIGHT
+        self._wrap_after_id = None
+        self.page_jobs = []
+
+        # Re-wrap khi kéo cột hoặc resize cửa sổ
+        self.tree.bind("<Configure>", self._schedule_rewrap, add="+")
+        self.tree.bind("<ButtonRelease-1>", self._schedule_rewrap, add="+")
+
+        self._build_filter_header()
 
         # --------------------------------------------------------
         # Events
@@ -1146,23 +1193,18 @@ class MainWindow:
             font_size=self.HTML_FONT_SIZE_LARGE
         )
 
-        # Specifications: bullet list đơn giản trên nền trắng (không card).
-        self.spec_section = self._build_html_section(
+        self.benefits_section = self._build_html_section(
             row=6,
+            title="Quyền lợi",
+            font_size=self.HTML_FONT_SIZE_LARGE
+        )
+
+        self.spec_section = self._build_html_section(
+            row=8,
             title="Thông tin khác",
             card=False,
             font_size=self.HTML_FONT_SIZE_LARGE,
             line_gap=self.SPEC_LINE_GAP
-        )
-
-        self.benefits_section = self._build_html_section(
-            row=8,
-            title="Quyền lợi"
-        )
-
-        self.contact_section = self._build_html_section(
-            row=10,
-            title="Thông tin liên hệ"
         )
 
     # ============================================================
@@ -1603,6 +1645,7 @@ class MainWindow:
         self.filtered_jobs = list(jobs)
         self.current_page = 1
 
+        self._prune_filters()
         self.on_search()
 
     def _on_load_failed(self, message):
@@ -1647,6 +1690,93 @@ class MainWindow:
     # Refresh Table
     # ============================================================
 
+    # ============================================================
+    # Word wrap (Treeview không hỗ trợ sẵn -> tự ngắt dòng bằng \n)
+    # ============================================================
+
+    def _wrap_text(self, text, width):
+        """Ngắt text thành nhiều dòng vừa `width` pixel. Trả về (text, số dòng)."""
+        text = (text or "").replace("\n", " ").strip()
+        font = self._row_font
+
+        if width <= 0 or font.measure(text) <= width:
+            return text, 1
+
+        lines, current = [], ""
+
+        for word in text.split():
+            candidate = f"{current} {word}".strip()
+
+            if font.measure(candidate) <= width:
+                current = candidate
+                continue
+
+            if current:
+                lines.append(current)
+
+            # Từ đơn quá dài so với cột -> cắt theo ký tự
+            while len(word) > 1 and font.measure(word) > width:
+                cut = len(word)
+                while cut > 1 and font.measure(word[:cut]) > width:
+                    cut -= 1
+                lines.append(word[:cut])
+                word = word[cut:]
+
+            current = word
+
+        if current:
+            lines.append(current)
+
+        return "\n".join(lines), len(lines)
+
+    def _row_values(self, job):
+        wrapped, max_lines = {}, 1
+
+        for key in self.WRAP_COLUMNS:
+            width = int(self.tree.column(key, "width")) - self.CELL_PADDING
+            wrapped[key], lines = self._wrap_text(job[key], width)
+            max_lines = max(max_lines, lines)
+
+        values = (
+            wrapped["title"],
+            wrapped["company"],
+            wrapped["location"],
+            job["source"],
+            job["posted_at"],
+            job["expire_date"],
+        )
+
+        return values, max_lines
+
+    def _set_row_height(self, max_lines):
+        line_h = self._row_font.metrics("linespace")
+        height = max(self.MIN_ROW_HEIGHT, line_h * max_lines + 12)
+
+        if height != self._row_height:
+            self._row_height = height
+            ttk.Style().configure("Jobs.Treeview", rowheight=height)
+
+    def _apply_wrap(self):
+        self._wrap_after_id = None
+        max_lines = 1
+
+        for job in self.page_jobs:
+            if not self.tree.exists(job["id"]):
+                continue
+
+            values, lines = self._row_values(job)
+            self.tree.item(job["id"], values=values)
+            max_lines = max(max_lines, lines)
+
+        self._set_row_height(max_lines)
+
+    def _schedule_rewrap(self, event=None):
+        # Debounce để không wrap liên tục khi đang kéo
+        if self._wrap_after_id:
+            self.root.after_cancel(self._wrap_after_id)
+
+        self._wrap_after_id = self.root.after(80, self._apply_wrap)
+
     def refresh_table(self):
         for item in self.tree.get_children():
             self.tree.delete(item)
@@ -1672,6 +1802,8 @@ class MainWindow:
 
         page_jobs = self.filtered_jobs[start:end]
 
+        self.page_jobs = page_jobs
+
         for job in page_jobs:
             self.tree.insert(
                 "",
@@ -1686,6 +1818,8 @@ class MainWindow:
                     job["expire_date"]
                 )
             )
+
+        self._apply_wrap()
 
         self.page_entry.delete(0, "end")
         self.page_entry.insert(0, str(self.current_page))
@@ -1815,11 +1949,6 @@ class MainWindow:
             job.get("benefits")
         )
 
-        self._set_html_section(
-            self.contact_section,
-            job.get("contact")
-        )
-
     def _scroll_details_to_top(self):
         canvas = getattr(self.detail_scroll, "_parent_canvas", None)
 
@@ -1895,14 +2024,1097 @@ class MainWindow:
         for section in (
             self.desc_section,
             self.req_section,
-            self.benefits_section,
-            self.contact_section
+            self.benefits_section
         ):
             self._set_html_section(section, "")
 
     # ============================================================
     # Search
     # ============================================================
+
+    # ------------------------------------------------------------
+    # Header filter (popup checklist kiểu Excel cho Location / Source)
+    # ------------------------------------------------------------
+
+    def _build_filter_header(self):
+        # None = không lọc. Checklist: set các key chuẩn hóa được chọn.
+        # Text: (điều kiện, text gõ, text chuẩn hóa)
+        # Date: (từ ngày | None, đến ngày | None)
+        self.column_filters = {key: None for key in self.FILTER_COLUMNS}
+        self.filter_icons = {}
+        self._fp = None  # state của popup đang mở
+        self._fit_after_id = None
+
+        for key in self.FILTER_COLUMNS:
+            self.tree.heading(
+                key,
+                anchor="w",
+                command=lambda k=key: self._toggle_filter_popup(k)
+            )
+
+            icon = tk.Label(
+                self.tree,
+                text=self.ICON_IDLE,
+                bg=self.WHITE,
+                fg=self.TEXT_MUTED,
+                font=("Segoe UI Symbol", 9),
+                cursor="hand2"
+            )
+
+            icon.bind(
+                "<Button-1>",
+                lambda e, k=key: self._toggle_filter_popup(k)
+            )
+            icon.bind(
+                "<Enter>",
+                lambda e, w=icon: w.configure(bg=self.HOVER_BG)
+            )
+            icon.bind(
+                "<Leave>",
+                lambda e, w=icon: w.configure(bg=self.WHITE)
+            )
+
+            self.filter_icons[key] = icon
+
+        # Icon luôn bám theo mép phải của cột khi kéo cột / resize
+        for sequence in ("<Configure>", "<B1-Motion>", "<ButtonRelease-1>"):
+            self.tree.bind(sequence, self._position_filter_icons, add="+")
+
+        # Cửa sổ hẹp: thu các cột stretch để cột Posted At / Expire Date
+        # (và icon lọc của chúng) không bị cắt khỏi khung nhìn
+        self.tree.bind("<Configure>", self._schedule_fit_columns, add="+")
+
+        # Click ra ngoài / di chuyển cửa sổ -> đóng popup
+        self.root.bind("<Button-1>", self._on_root_click, add="+")
+        self.root.bind("<Configure>", self._on_root_configure, add="+")
+
+        self._position_filter_icons()
+
+    def _measure_header_height(self):
+        """Chiều cao hàng tiêu đề: quét y đến khi hết vùng 'heading'."""
+        for y in range(2, 80):
+            if self.tree.identify_region(5, y) != "heading":
+                return y if y >= 12 else self.DEFAULT_HEADER_HEIGHT
+
+        return self.DEFAULT_HEADER_HEIGHT
+
+    def _column_left(self, key):
+        left = 0
+
+        for name in self.tree["columns"]:
+            if name == key:
+                break
+            left += int(self.tree.column(name, "width"))
+
+        return left
+
+    def _schedule_fit_columns(self, event=None):
+        if self._fit_after_id:
+            self.root.after_cancel(self._fit_after_id)
+
+        self._fit_after_id = self.root.after(100, self._fit_columns)
+
+    def _fit_columns(self):
+        """Treeview không tự thu nhỏ cột khi khung hẹp lại -> thu các cột
+        stretch (không thấp hơn minwidth) cho vừa khung."""
+        self._fit_after_id = None
+
+        available = self.tree.winfo_width()
+
+        if available <= 1:
+            return
+
+        names = self.tree["columns"]
+        widths = {n: int(self.tree.column(n, "width")) for n in names}
+        excess = sum(widths.values()) - available
+
+        room = {
+            n: widths[n] - int(self.tree.column(n, "minwidth"))
+            for n in names
+            if str(self.tree.column(n, "stretch")).lower() in ("1", "true")
+        }
+
+        room = {n: r for n, r in room.items() if r > 0}
+        capacity = sum(room.values())
+
+        if excess <= 0 or capacity <= 0:
+            return
+
+        cut = min(excess, capacity)
+
+        for name, available_room in room.items():
+            share = math.ceil(cut * available_room / capacity)
+            self.tree.column(name, width=widths[name] - min(share, available_room))
+
+        self._position_filter_icons()
+        self._schedule_rewrap()
+
+    def _position_filter_icons(self, event=None):
+        header_h = self._measure_header_height()
+
+        for key, icon in self.filter_icons.items():
+            right = self._column_left(key) + int(
+                self.tree.column(key, "width")
+            )
+
+            icon.place(
+                x=right - self.ICON_WIDTH - 2,
+                y=1,
+                width=self.ICON_WIDTH,
+                height=header_h - 2
+            )
+
+    def _update_filter_icons(self):
+        for key, icon in self.filter_icons.items():
+            if self.column_filters[key] is None:
+                icon.configure(text=self.ICON_IDLE, fg=self.TEXT_MUTED)
+            else:
+                icon.configure(text=self.ICON_ACTIVE, fg=self.FILTER_ACTIVE)
+
+    @staticmethod
+    def _split_locations(value):
+        """'Hà Nội, Hồ Chí Minh' -> ['Hà Nội', 'Hồ Chí Minh']."""
+        return [
+            part.strip()
+            for part in re.split(r"[,;/|]", value or "")
+            if part.strip()
+        ]
+
+    @staticmethod
+    def _normalize_text(text):
+        """'  Hà   Nội ' -> 'ha noi' (bỏ dấu, chữ thường, gọn khoảng trắng)."""
+        text = (text or "").replace("đ", "d").replace("Đ", "D")
+        decomposed = unicodedata.normalize("NFD", text)
+
+        stripped = "".join(
+            ch for ch in decomposed if not unicodedata.combining(ch)
+        )
+
+        return " ".join(stripped.casefold().split())
+
+    def _matches_query(self, display, query):
+        """Gõ 'Hà' -> khớp đúng dấu; gõ 'ha' (không dấu) -> khớp mọi dấu."""
+        if not query:
+            return True
+
+        has_accent = (
+            self._normalize_text(query) != " ".join(query.casefold().split())
+        )
+
+        if has_accent:
+            return query.casefold() in display.casefold()
+
+        return self._normalize_text(query) in self._normalize_text(display)
+
+    @staticmethod
+    def _pick_label(variants):
+        """Chọn nhãn đẹp nhất trong các biến thể: có dấu > viết hoa đúng
+        kiểu ('Hà Nội') > xuất hiện nhiều nhất."""
+
+        def score(item):
+            variant, count = item
+            has_accent = (
+                MainWindow._normalize_text(variant)
+                != " ".join(variant.casefold().split())
+            )
+            return (has_accent, variant == variant.title(), count)
+
+        return max(variants.items(), key=score)[0]
+
+    def _group_variants(self, values, by_count):
+        """Gộp các biến thể cùng chuỗi chuẩn hóa thành 1 dòng:
+        'Hà Nội' / 'Ha Noi' / 'HA NOI' -> key 'ha noi', nhãn 'Hà Nội'."""
+        groups = {}  # key chuẩn hóa -> Counter(các biến thể gốc trong DB)
+
+        for value in values:
+            key = self._normalize_text(value)
+
+            if key:
+                variant = " ".join(value.split())
+                groups.setdefault(key, Counter())[variant] += 1
+
+        keys = sorted(
+            groups,
+            key=(
+                (lambda k: (-sum(groups[k].values()), k))
+                if by_count
+                else (lambda k: k)
+            )
+        )
+
+        return [(key, self._pick_label(groups[key])) for key in keys]
+
+    def _filter_options(self, key):
+        """Danh sách [(key_chuẩn_hóa, nhãn_hiển_thị)] cho popup của cột."""
+        if key == "location":
+            # Nhiều job nhất đứng đầu (Hà Nội, Hồ Chí Minh, ...)
+            values = [
+                name
+                for job in self.jobs
+                for name in self._split_locations(job["location"])
+            ]
+            return self._group_variants(values, by_count=True)
+
+        values = [job[key] for job in self.jobs if job[key]]
+        return self._group_variants(values, by_count=False)
+
+    def _prune_filters(self):
+        """Sau khi nạp lại dữ liệu: bỏ các lựa chọn không còn tồn tại."""
+        for key in self.CHECKLIST_COLUMNS:
+            selected = self.column_filters[key]
+
+            if selected is None:
+                continue
+
+            valid = {k for k, _ in self._filter_options(key)}
+            self.column_filters[key] = (selected & valid) or None
+
+        self._update_filter_icons()
+
+    # --- popup lọc theo từ khóa (Job Title / Company) -------------
+
+    def _create_popup_window(self):
+        window = tk.Toplevel(self.root)
+        window.overrideredirect(True)
+        window.attributes("-topmost", True)
+        window.configure(bg=self.BORDER, padx=1, pady=1)
+
+        body = tk.Frame(window, bg=self.WHITE)
+        body.pack(fill="both", expand=True)
+
+        return window, body
+
+    def _build_popup_buttons(self, parent):
+        """Hàng nút [Xóa lọc] [Áp dụng] dùng chung cho mọi popup."""
+        button_row = tk.Frame(parent, bg=self.WHITE)
+        button_row.pack(fill="x", padx=8, pady=8)
+
+        apply_button = tk.Button(
+            button_row,
+            text="Áp dụng",
+            command=self._apply_filter_popup,
+            bg=self.FILTER_ACTIVE,
+            fg="#FFFFFF",
+            activebackground="#1E40AF",
+            activeforeground="#FFFFFF",
+            disabledforeground="#BFDBFE",
+            relief="flat",
+            bd=0,
+            padx=14,
+            pady=4,
+            font=("Segoe UI Semibold", 9),
+            cursor="hand2"
+        )
+
+        clear_button = tk.Button(
+            button_row,
+            text="Xóa lọc",
+            command=self._clear_filter_popup,
+            bg=self.WHITE,
+            fg=self.TEXT_SECONDARY,
+            activebackground=self.HOVER_BG,
+            relief="flat",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=self.BORDER,
+            padx=14,
+            pady=3,
+            font=("Segoe UI", 9),
+            cursor="hand2"
+        )
+
+        apply_button.pack(side="right")
+        clear_button.pack(side="right", padx=(0, 6))
+
+        return apply_button
+
+    def _open_text_filter_popup(self, key):
+        # rule: None | (điều kiện, text người dùng gõ, text đã chuẩn hóa)
+        rule = self.column_filters[key]
+
+        window, body = self._create_popup_window()
+
+        tk.Label(
+            body,
+            text="Điều kiện",
+            bg=self.WHITE,
+            fg=self.TEXT_SECONDARY,
+            font=("Segoe UI", 9)
+        ).pack(anchor="w", padx=8, pady=(8, 2))
+
+        condition = tk.StringVar(
+            value=self.TEXT_CONDITIONS[rule[0] if rule else "contains"]
+        )
+
+        combo = ttk.Combobox(
+            body,
+            textvariable=condition,
+            values=list(self.TEXT_CONDITIONS.values()),
+            state="readonly",
+            font=("Segoe UI", 10)
+        )
+
+        combo.pack(fill="x", padx=8)
+
+        tk.Label(
+            body,
+            text="Nhập từ khóa tìm kiếm...",
+            bg=self.WHITE,
+            fg=self.TEXT_SECONDARY,
+            font=("Segoe UI", 9)
+        ).pack(anchor="w", padx=8, pady=(8, 2))
+
+        query = tk.StringVar(value=rule[1] if rule else "")
+
+        entry = tk.Entry(
+            body,
+            textvariable=query,
+            width=32,
+            font=("Segoe UI", 10),
+            relief="flat",
+            bg=self.WHITE,
+            fg=self.TEXT_PRIMARY,
+            insertbackground=self.TEXT_PRIMARY,
+            highlightthickness=1,
+            highlightbackground=self.BORDER,
+            highlightcolor=self.FILTER_ACTIVE
+        )
+
+        entry.pack(fill="x", padx=8, ipady=3)
+
+        self._build_popup_buttons(body)
+
+        self._fp = {
+            "type": "text",
+            "key": key,
+            "window": window,
+            "query": query,
+            "condition": condition,
+            "after_id": None
+        }
+
+        # Gõ đến đâu bảng lọc đến đó (debounce để không giật)
+        query.trace_add("write", lambda *_: self._schedule_text_filter())
+        combo.bind("<<ComboboxSelected>>", lambda e: self._schedule_text_filter())
+
+        for widget in (entry, combo):
+            widget.bind("<Escape>", lambda e: self._close_filter_popup())
+            widget.bind("<Return>", lambda e: self._apply_filter_popup())
+
+        self._place_filter_popup(window, key)
+
+        window.after(20, lambda: (entry.focus_force(), entry.select_range(0, "end")))
+
+    def _schedule_text_filter(self):
+        fp = self._fp
+
+        if not fp or fp.get("type") != "text":
+            return
+
+        if fp["after_id"]:
+            self.root.after_cancel(fp["after_id"])
+
+        fp["after_id"] = self.root.after(250, self._apply_text_filter)
+
+    def _apply_text_filter(self):
+        fp = self._fp
+
+        if not fp or fp.get("type") != "text":
+            return
+
+        if fp["after_id"]:
+            self.root.after_cancel(fp["after_id"])
+            fp["after_id"] = None
+
+        text = fp["query"].get().strip()
+        needle = self._normalize_text(text)
+        label = fp["condition"].get()
+
+        condition = next(
+            (k for k, v in self.TEXT_CONDITIONS.items() if v == label),
+            "contains"
+        )
+
+        # Ô trống = không lọc
+        self.column_filters[fp["key"]] = (
+            (condition, text, needle) if needle else None
+        )
+
+        self._on_filters_changed()
+
+    def _text_matches(self, value, condition, needle):
+        value = self._normalize_text(value)
+
+        if condition == "startswith":
+            return value.startswith(needle)
+
+        if condition == "endswith":
+            return value.endswith(needle)
+
+        return needle in value
+
+    # --- popup lọc theo khoảng ngày (Posted At / Expire Date) -----
+
+    @staticmethod
+    def _parse_date(text):
+        """'04/10/2026' -> date; để trống -> None; sai định dạng -> ValueError."""
+        text = (text or "").strip()
+
+        if not text:
+            return None
+
+        return datetime.strptime(text, "%d/%m/%Y").date()
+
+    @staticmethod
+    def _format_date(value):
+        return value.strftime("%d/%m/%Y") if value else ""
+
+    @staticmethod
+    def _date_in_range(value, start, end):
+        """Mốc `value` (datetime) có nằm trong [start, end] (tính theo ngày)?"""
+        if not isinstance(value, datetime):
+            return False  # job không có ngày thì loại khi đang lọc
+
+        day = value.date()
+
+        return (start is None or day >= start) and (end is None or day <= end)
+
+    def _date_presets(self, key):
+        """[(nhãn, từ ngày, đến ngày)] - None/None nghĩa là 'Tất cả'."""
+        today = date.today()
+        last_day = calendar.monthrange(today.year, today.month)[1]
+
+        presets = [
+            ("Tất cả", None, None),
+            ("Hôm nay", today, today),
+            ("7 ngày qua", today - timedelta(days=6), today),
+            ("30 ngày qua", today - timedelta(days=29), today),
+            (
+                "Tháng này",
+                today.replace(day=1),
+                today.replace(day=last_day)
+            ),
+        ]
+
+        # Ngày hết hạn thường nằm ở tương lai -> thêm mốc "tới"
+        if key == "expire_date":
+            presets[4:4] = [
+                ("7 ngày tới", today, today + timedelta(days=6)),
+                ("30 ngày tới", today, today + timedelta(days=29)),
+            ]
+
+        return presets
+
+    def _build_calendar(self, parent, shown, selected, on_pick):
+        """Lịch tháng gọn: ‹ Tháng m/yyyy › + lưới ngày (T2 -> CN)."""
+        frame = tk.Frame(
+            parent,
+            bg=self.WHITE,
+            highlightthickness=1,
+            highlightbackground=self.BORDER
+        )
+
+        state = {"year": shown.year, "month": shown.month}
+
+        header = tk.Frame(frame, bg=self.WHITE)
+        header.pack(fill="x", padx=4, pady=4)
+
+        title = tk.Label(
+            header,
+            bg=self.WHITE,
+            fg=self.TEXT_PRIMARY,
+            font=("Segoe UI Semibold", 10)
+        )
+
+        grid = tk.Frame(frame, bg=self.WHITE)
+        grid.pack(padx=4, pady=(0, 4))
+
+        def render():
+            for child in grid.winfo_children():
+                child.destroy()
+
+            title.configure(text=f"Tháng {state['month']}/{state['year']}")
+
+            for col, name in enumerate(
+                ("T2", "T3", "T4", "T5", "T6", "T7", "CN")
+            ):
+                tk.Label(
+                    grid,
+                    text=name,
+                    width=3,
+                    bg=self.WHITE,
+                    fg=self.TEXT_MUTED,
+                    font=("Segoe UI", 8)
+                ).grid(row=0, column=col)
+
+            today = date.today()
+            weeks = calendar.monthcalendar(state["year"], state["month"])
+
+            for row, week in enumerate(weeks, start=1):
+                for col, day in enumerate(week):
+                    if not day:
+                        continue
+
+                    value = date(state["year"], state["month"], day)
+
+                    if value == selected:
+                        bg, fg = self.FILTER_ACTIVE, "#FFFFFF"
+                    elif value == today:
+                        bg, fg = "#DBEAFE", self.TEXT_PRIMARY
+                    else:
+                        bg, fg = self.WHITE, self.TEXT_PRIMARY
+
+                    tk.Button(
+                        grid,
+                        text=str(day),
+                        width=3,
+                        relief="flat",
+                        bd=0,
+                        bg=bg,
+                        fg=fg,
+                        activebackground=self.HOVER_BG,
+                        font=("Segoe UI", 9),
+                        cursor="hand2",
+                        command=lambda v=value: on_pick(v)
+                    ).grid(row=row, column=col, padx=1, pady=1)
+
+        def shift(delta):
+            index = state["year"] * 12 + state["month"] - 1 + delta
+            state["year"], state["month"] = index // 12, index % 12 + 1
+            render()
+
+        for text, delta, side in (("‹", -1, "left"), ("›", 1, "right")):
+            tk.Button(
+                header,
+                text=text,
+                width=3,
+                relief="flat",
+                bd=0,
+                bg=self.WHITE,
+                fg=self.TEXT_SECONDARY,
+                activebackground=self.HOVER_BG,
+                font=("Segoe UI", 10),
+                cursor="hand2",
+                command=lambda d=delta: shift(d)
+            ).pack(side=side)
+
+        title.pack(side="left", expand=True, fill="x")
+
+        render()
+
+        return frame
+
+    def _open_date_filter_popup(self, key):
+        # rule: None | (từ ngày | None, đến ngày | None)
+        rule = self.column_filters[key]
+
+        window, body = self._create_popup_window()
+
+        self._fp = {
+            "type": "date",
+            "key": key,
+            "window": window,
+            "vars": {
+                "from": tk.StringVar(
+                    value=self._format_date(rule[0]) if rule else ""
+                ),
+                "to": tk.StringVar(
+                    value=self._format_date(rule[1]) if rule else ""
+                ),
+            },
+            "holders": {},
+            "error": None,
+        }
+
+        fp = self._fp
+
+        # --- Chọn nhanh ---
+        tk.Label(
+            body,
+            text="Chọn nhanh",
+            bg=self.WHITE,
+            fg=self.TEXT_SECONDARY,
+            font=("Segoe UI", 9)
+        ).pack(anchor="w", padx=8, pady=(8, 2))
+
+        preset_frame = tk.Frame(body, bg=self.WHITE)
+        preset_frame.pack(fill="x", padx=6)
+
+        for index, (label, start, end) in enumerate(self._date_presets(key)):
+            tk.Button(
+                preset_frame,
+                text=label,
+                command=lambda s=start, e=end: self._apply_date_preset(s, e),
+                bg=self.WHITE,
+                fg=self.TEXT_PRIMARY,
+                activebackground=self.HOVER_BG,
+                relief="flat",
+                bd=0,
+                highlightthickness=1,
+                highlightbackground=self.BORDER,
+                padx=8,
+                pady=3,
+                font=("Segoe UI", 9),
+                cursor="hand2"
+            ).grid(row=index // 3, column=index % 3, sticky="ew", padx=2, pady=2)
+
+        for col in range(3):
+            preset_frame.grid_columnconfigure(col, weight=1, uniform="preset")
+
+        tk.Frame(body, height=1, bg=self.BORDER).pack(
+            fill="x", padx=8, pady=8
+        )
+
+        # --- Từ ngày / Đến ngày ---
+        entries = []
+
+        for name, label in (("from", "Từ ngày"), ("to", "Đến ngày")):
+            tk.Label(
+                body,
+                text=f"{label} (dd/mm/yyyy)",
+                bg=self.WHITE,
+                fg=self.TEXT_SECONDARY,
+                font=("Segoe UI", 9)
+            ).pack(anchor="w", padx=8, pady=(0, 2))
+
+            row = tk.Frame(body, bg=self.WHITE)
+            row.pack(fill="x", padx=8, pady=(0, 6))
+
+            entry = tk.Entry(
+                row,
+                textvariable=fp["vars"][name],
+                width=14,
+                font=("Segoe UI", 10),
+                relief="flat",
+                bg=self.WHITE,
+                fg=self.TEXT_PRIMARY,
+                insertbackground=self.TEXT_PRIMARY,
+                highlightthickness=1,
+                highlightbackground=self.BORDER,
+                highlightcolor=self.FILTER_ACTIVE
+            )
+
+            entry.pack(side="left", ipady=3)
+            entries.append(entry)
+
+            tk.Button(
+                row,
+                text="▦",
+                command=lambda n=name: self._toggle_date_calendar(n),
+                bg=self.WHITE,
+                fg=self.FILTER_ACTIVE,
+                activebackground=self.HOVER_BG,
+                relief="flat",
+                bd=0,
+                highlightthickness=1,
+                highlightbackground=self.BORDER,
+                padx=6,
+                font=("Segoe UI Symbol", 10),
+                cursor="hand2"
+            ).pack(side="left", padx=(6, 0))
+
+            holder = tk.Frame(body, bg=self.WHITE)
+            holder.pack(fill="x", padx=8)
+            fp["holders"][name] = holder
+
+        fp["error"] = tk.Label(
+            body,
+            text="",
+            bg=self.WHITE,
+            fg="#DC2626",
+            font=("Segoe UI", 9)
+        )
+
+        fp["error"].pack(anchor="w", padx=8)
+
+        self._build_popup_buttons(body)
+
+        for entry in entries:
+            entry.bind("<Escape>", lambda e: self._close_filter_popup())
+            entry.bind("<Return>", lambda e: self._apply_filter_popup())
+
+        self._place_filter_popup(window, key)
+
+        window.after(20, entries[0].focus_force)
+
+    def _toggle_date_calendar(self, which):
+        fp = self._fp
+
+        for name, holder in fp["holders"].items():
+            was_open = bool(holder.winfo_children())
+
+            for child in holder.winfo_children():
+                child.destroy()
+
+            if name != which or was_open:
+                continue
+
+            try:
+                current = self._parse_date(fp["vars"][name].get())
+            except ValueError:
+                current = None
+
+            self._build_calendar(
+                holder,
+                shown=current or date.today(),
+                selected=current,
+                on_pick=lambda d, n=name: self._pick_date(n, d)
+            ).pack(anchor="w", pady=(0, 6))
+
+    def _pick_date(self, which, picked):
+        fp = self._fp
+
+        fp["vars"][which].set(self._format_date(picked))
+        fp["error"].configure(text="")
+
+        for child in fp["holders"][which].winfo_children():
+            child.destroy()
+
+    def _apply_date_preset(self, start, end):
+        fp = self._fp
+
+        fp["vars"]["from"].set(self._format_date(start))
+        fp["vars"]["to"].set(self._format_date(end))
+
+        self._apply_filter_popup()
+
+    def _apply_date_filter(self):
+        fp = self._fp
+
+        try:
+            start = self._parse_date(fp["vars"]["from"].get())
+            end = self._parse_date(fp["vars"]["to"].get())
+        except ValueError:
+            fp["error"].configure(text="Ngày không hợp lệ, nhập dd/mm/yyyy")
+            return
+
+        if start and end and start > end:
+            fp["error"].configure(text="'Từ ngày' phải trước 'Đến ngày'")
+            return
+
+        # Cả hai trống = không lọc
+        self.column_filters[fp["key"]] = (
+            (start, end) if (start or end) else None
+        )
+
+        self._close_filter_popup()
+        self._on_filters_changed()
+
+    # --- popup ---------------------------------------------------
+
+    def _toggle_filter_popup(self, key):
+        if self._fp and self._fp["key"] == key:
+            self._close_filter_popup()
+        else:
+            self._open_filter_popup(key)
+
+    def _open_filter_popup(self, key):
+        self._close_filter_popup()
+
+        if key in self.TEXT_COLUMNS:
+            self._open_text_filter_popup(key)
+            return
+
+        if key in self.DATE_COLUMNS:
+            self._open_date_filter_popup(key)
+            return
+
+        options = self._filter_options(key)
+        selected = self.column_filters[key]
+        checked = (
+            {k for k, _ in options} if selected is None else set(selected)
+        )
+
+        window, body = self._create_popup_window()
+
+        # Ô tìm kiếm trong popup
+        search_row = tk.Frame(body, bg=self.WHITE)
+        search_row.pack(fill="x", padx=8, pady=(8, 6))
+
+        tk.Label(
+            search_row,
+            text="Tìm kiếm",
+            bg=self.WHITE,
+            fg=self.TEXT_SECONDARY,
+            font=("Segoe UI", 9)
+        ).pack(side="left", padx=(0, 6))
+
+        query = tk.StringVar()
+
+        entry = tk.Entry(
+            search_row,
+            textvariable=query,
+            font=("Segoe UI", 10),
+            relief="flat",
+            bg=self.WHITE,
+            fg=self.TEXT_PRIMARY,
+            insertbackground=self.TEXT_PRIMARY,
+            highlightthickness=1,
+            highlightbackground=self.BORDER,
+            highlightcolor=self.FILTER_ACTIVE
+        )
+
+        entry.pack(side="left", fill="x", expand=True, ipady=3)
+
+        # Danh sách checkbox (Listbox: cuộn mượt kể cả khi có hàng trăm mục)
+        list_row = tk.Frame(body, bg=self.WHITE)
+        list_row.pack(fill="both", expand=True, padx=8)
+
+        scrollbar = ttk.Scrollbar(
+            list_row,
+            orient="vertical",
+            style="Vertical.TScrollbar"
+        )
+
+        listbox = tk.Listbox(
+            list_row,
+            height=10,
+            width=30,
+            font=("Segoe UI", 10),
+            activestyle="none",
+            bd=0,
+            highlightthickness=0,
+            exportselection=False,
+            bg=self.WHITE,
+            fg=self.TEXT_PRIMARY,
+            selectbackground=self.WHITE,
+            selectforeground=self.TEXT_PRIMARY,
+            yscrollcommand=scrollbar.set
+        )
+
+        scrollbar.configure(command=listbox.yview)
+        scrollbar.pack(side="right", fill="y")
+        listbox.pack(side="left", fill="both", expand=True)
+
+        # Nút hành động
+        apply_button = self._build_popup_buttons(body)
+
+        self._fp = {
+            "key": key,
+            "window": window,
+            "options": options,
+            "checked": checked,
+            "visible": [],
+            "query": query,
+            "list": listbox,
+            "apply": apply_button
+        }
+
+        query.trace_add("write", lambda *_: self._render_filter_list())
+        listbox.bind("<Button-1>", self._on_filter_list_click)
+
+        for widget in (entry, listbox):
+            widget.bind("<Escape>", lambda e: self._close_filter_popup())
+            widget.bind("<Return>", lambda e: self._apply_filter_popup())
+
+        self._render_filter_list()
+        self._place_filter_popup(window, key)
+
+        window.after(20, entry.focus_force)
+
+    def _place_filter_popup(self, window, key):
+        window.update_idletasks()
+
+        x = self.tree.winfo_rootx() + self._column_left(key)
+        y = self.tree.winfo_rooty() + self._measure_header_height()
+
+        # Không để popup tràn ra ngoài màn hình
+        x = max(0, min(x, window.winfo_screenwidth() - window.winfo_reqwidth() - 8))
+
+        window.geometry(f"+{x}+{y}")
+
+    def _render_filter_list(self):
+        fp = self._fp
+
+        if not fp:
+            return
+
+        query = fp["query"].get().strip()
+
+        visible = [
+            (k, display)
+            for k, display in fp["options"]
+            if self._matches_query(display, query)
+        ]
+
+        fp["visible"] = visible
+
+        listbox = fp["list"]
+        top = listbox.yview()[0]
+
+        all_checked = bool(visible) and all(
+            k in fp["checked"] for k, _ in visible
+        )
+
+        listbox.delete(0, "end")
+        listbox.insert("end", f"{self._box(all_checked)}  Chọn tất cả")
+
+        for k, display in visible:
+            listbox.insert(
+                "end",
+                f"{self._box(k in fp['checked'])}  {display}"
+            )
+
+        listbox.yview_moveto(top)
+
+        # Không chọn mục nào thì không cho Áp dụng
+        fp["apply"].configure(
+            state="normal" if fp["checked"] else "disabled"
+        )
+
+    @staticmethod
+    def _box(is_checked):
+        return "☑" if is_checked else "☐"
+
+    def _on_filter_list_click(self, event):
+        fp = self._fp
+        listbox = fp["list"]
+
+        index = listbox.nearest(event.y)
+        bbox = listbox.bbox(index) if index >= 0 else None
+
+        # Click vào vùng trống bên dưới mục cuối thì bỏ qua
+        if not bbox or event.y > bbox[1] + bbox[3]:
+            return "break"
+
+        visible_keys = {k for k, _ in fp["visible"]}
+
+        if index == 0:
+            # "Chọn tất cả" tác động lên các mục đang hiển thị (đã lọc)
+            if visible_keys <= fp["checked"]:
+                fp["checked"] -= visible_keys
+            else:
+                fp["checked"] |= visible_keys
+        else:
+            k = fp["visible"][index - 1][0]
+            fp["checked"] ^= {k}
+
+        self._render_filter_list()
+
+        return "break"
+
+    def _apply_filter_popup(self):
+        fp = self._fp
+
+        if fp and fp.get("type") == "text":
+            self._apply_text_filter()
+            self._close_filter_popup()
+            return
+
+        if fp and fp.get("type") == "date":
+            self._apply_date_filter()
+            return
+
+        if not fp or not fp["checked"]:
+            return
+
+        all_keys = {k for k, _ in fp["options"]}
+        checked = fp["checked"] & all_keys
+
+        # Chọn đủ tất cả = không lọc
+        self.column_filters[fp["key"]] = (
+            None if checked == all_keys else checked
+        )
+
+        self._close_filter_popup()
+        self._on_filters_changed()
+
+    def _clear_filter_popup(self):
+        if not self._fp:
+            return
+
+        self.column_filters[self._fp["key"]] = None
+
+        self._close_filter_popup()
+        self._on_filters_changed()
+
+    def _close_filter_popup(self):
+        fp = self._fp
+
+        if not fp:
+            return
+
+        # Đóng khi còn lần gõ chưa kịp lọc -> lọc nốt
+        if fp.get("after_id"):
+            self.root.after_cancel(fp["after_id"])
+            self._apply_text_filter()
+
+        fp["window"].destroy()
+        self._fp = None
+
+    def _on_filters_changed(self):
+        self._update_filter_icons()
+        self.on_search()
+
+    def _on_root_click(self, event):
+        if not self._fp:
+            return
+
+        widget = event.widget
+
+        if widget in self.filter_icons.values():
+            return  # icon tự toggle
+
+        if widget is self.tree and self.tree.identify_region(
+            event.x, event.y
+        ) == "heading":
+            column = self.tree.identify_column(event.x)  # '#3'
+            index = int(column[1:]) - 1 if column else -1
+            names = self.tree["columns"]
+
+            if 0 <= index < len(names) and names[index] in self.FILTER_COLUMNS:
+                return  # heading của cột lọc tự toggle
+
+        self._close_filter_popup()
+
+    def _on_root_configure(self, event):
+        if event.widget is self.root:
+            self._close_filter_popup()
+
+    def _matches_filters(self, job, keyword):
+        for key, raw_key in self.DATE_COLUMNS.items():
+            rule = self.column_filters[key]
+
+            if rule is not None and not self._date_in_range(
+                job.get(raw_key), *rule
+            ):
+                return False
+
+        for key in self.TEXT_COLUMNS:
+            rule = self.column_filters[key]
+
+            if rule is not None:
+                condition, _, needle = rule
+
+                if not self._text_matches(job[key], condition, needle):
+                    return False
+
+        selected = self.column_filters["location"]
+
+        if selected is not None:
+            names = {
+                self._normalize_text(name)
+                for name in self._split_locations(job["location"])
+            }
+
+            if not names & selected:
+                return False
+
+        selected = self.column_filters["source"]
+
+        if (
+            selected is not None
+            and self._normalize_text(job["source"]) not in selected
+        ):
+            return False
+
+        if not keyword:
+            return True
+
+        return any(
+            keyword in job[key].lower()
+            for key in ("title", "company", "location", "source")
+        )
 
     def on_search(self, event=None):
         keyword = (
@@ -1912,21 +3124,11 @@ class MainWindow:
             .lower()
         )
 
-        if not keyword:
-            self.filtered_jobs = list(
-                self.jobs
-            )
-        else:
-            self.filtered_jobs = [
-                job
-                for job in self.jobs
-                if (
-                    keyword in job["title"].lower()
-                    or keyword in job["company"].lower()
-                    or keyword in job["location"].lower()
-                    or keyword in job["source"].lower()
-                )
-            ]
+        self.filtered_jobs = [
+            job
+            for job in self.jobs
+            if self._matches_filters(job, keyword)
+        ]
 
         self.current_page = 1
 
