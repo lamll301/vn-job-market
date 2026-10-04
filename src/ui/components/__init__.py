@@ -13,6 +13,7 @@ from .filters import (
 )
 from .pagination import PaginationBar, PaginationTheme
 from .sort import SortManager, SortTheme, parse_salary
+from .state_overlay import StateOverlay, StateOverlayTheme
 
 __all__ = [
     "CrawlProgressDialog",
@@ -29,4 +30,6 @@ __all__ = [
     "SortManager",
     "SortTheme",
     "parse_salary",
+    "StateOverlay",
+    "StateOverlayTheme",
 ]
