@@ -40,6 +40,6 @@ def run_backup() -> None:
         print(f"[X] Backup thất bại: {exc}")
 
 if __name__ == "__main__":
-    run_ui()
-    # run_crawler()
+    # run_ui()
+    run_crawler()
     # run_backup()

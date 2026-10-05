@@ -109,6 +109,6 @@ async def run_topcv(repository: JobRepository, concurrency: int = 4) -> None:
 
 
 async def run_all(repository: JobRepository) -> None:
-    await run_vietnamworks(repository, concurrency=4)
+    # await run_vietnamworks(repository, concurrency=4)
     await run_careerlink(repository, concurrency=2)
     # await run_topcv(repository, concurrency=4)
