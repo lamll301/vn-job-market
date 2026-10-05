@@ -31,4 +31,4 @@ jobs:
         MONGODB_DATABASE: ${{ secrets.MONGODB_DATABASE }}
         PYTHONPATH: src
       run: |
-        python src/run_crawler.py
+        python src/crawler_runner.py
