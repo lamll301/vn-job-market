@@ -72,8 +72,8 @@ CAREERLINK_SEARCHES = {
             # 130     # CNTT - Phần cứng, mạng
         ],
         "province_codes": [
-            # "HP", 
-            # "HN",
+            "HP", 
+            "HN",
             "HCM",
             # "DN",
         ],

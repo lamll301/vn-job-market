@@ -84,12 +84,13 @@ async def run_topcv(repository: JobRepository, concurrency: int = 4) -> None:
 
     async with AsyncHttpClient(
         headers=TOPCV_HEADERS,
-        concurrency=concurrency,
-        base_min_delay=1.5,
-        base_max_delay=3.0,
-        max_retries=4,
+        concurrency=2,
+        base_min_delay=3.0,
+        base_max_delay=6.0,
+        max_retries=3,
         backoff_base=5.0,
         backoff_cap=60.0,
+        max_consecutive_failures=3,
     ) as http_client:
         for search_key in TOPCV_SEARCHES:
             print(f"\n---> Đang cào danh mục: '{search_key}'")
@@ -97,7 +98,7 @@ async def run_topcv(repository: JobRepository, concurrency: int = 4) -> None:
                 search_key=search_key,
                 http_client=http_client,
                 repository=repository,
-                concurrency=concurrency,
+                concurrency=2,
             )
             try:
                 await pipeline.run()
@@ -109,6 +110,6 @@ async def run_topcv(repository: JobRepository, concurrency: int = 4) -> None:
 
 
 async def run_all(repository: JobRepository) -> None:
-    # await run_vietnamworks(repository, concurrency=4)
+    await run_vietnamworks(repository, concurrency=4)
     await run_careerlink(repository, concurrency=2)
-    # await run_topcv(repository, concurrency=4)
+    await run_topcv(repository, concurrency=2)
