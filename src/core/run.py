@@ -91,6 +91,7 @@ async def run_topcv(repository: JobRepository, concurrency: int = 4) -> None:
         backoff_base=5.0,
         backoff_cap=60.0,
         max_consecutive_failures=3,
+        impersonate="chrome",
     ) as http_client:
         for search_key in TOPCV_SEARCHES:
             print(f"\n---> Đang cào danh mục: '{search_key}'")

@@ -41,5 +41,5 @@ def run_backup() -> None:
 
 if __name__ == "__main__":
     # run_ui()
-    run_crawler()
+    # run_crawler()
     # run_backup()

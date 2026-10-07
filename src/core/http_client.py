@@ -6,6 +6,17 @@ from typing import Any, Optional
 
 import httpx
 
+try:
+    from curl_cffi.requests import AsyncSession
+    from curl_cffi.requests.exceptions import (
+        ConnectionError as CurlConnectionError,
+        Timeout as CurlTimeout,
+    )
+    _CURL_ERRORS: tuple = (CurlTimeout, CurlConnectionError)
+except ImportError:  # curl_cffi chưa cài -> chỉ dùng httpx
+    AsyncSession = None
+    _CURL_ERRORS = ()
+
 
 class _RetryableStatus(Exception):
     """Internal signal: response status means 'back off and try again'."""
@@ -19,32 +30,32 @@ class SiteUnreachableError(Exception):
     """Too many consecutive failures -> site is probably blocking us."""
 
 
+_NETWORK_ERRORS = (
+    _RetryableStatus,
+    httpx.TimeoutException,
+    httpx.TransportError,
+    *_CURL_ERRORS,
+)
+
+
 class AsyncHttpClient:
     """
     Reusable async HTTP transport for any site crawler (CareerLink,
-    VietnamWorks, LinkedIn, TopCV, ...). Wraps httpx.AsyncClient with:
+    VietnamWorks, LinkedIn, TopCV, ...).
 
-      - Concurrency limit: asyncio.Semaphore(concurrency) caps how many
-        requests are in flight at once.
-      - Adaptive random delay: each request sleeps a random amount in
-        [min_delay, max_delay] before firing, to avoid a fixed-interval
-        fingerprint. That window widens automatically after a 429/403/timeout
-        (site is complaining -> slow everything down) and slowly relaxes
-        back toward the base window after clean responses.
-      - Exponential backoff retry: on 429 / 403 / 5xx / timeout /
-        connection errors, retries with backoff_base * 2**attempt
-        (+ jitter), capped at backoff_cap, up to max_retries times.
-      - Circuit breaker: after `max_consecutive_failures` requests that
-        failed even after all retries, further requests raise
-        SiteUnreachableError immediately instead of hammering a site
-        that is most likely blocking us.
+      - Concurrency limit: asyncio.Semaphore(concurrency).
+      - Adaptive random delay: widens after 429/403/timeout, relaxes after
+        clean responses.
+      - Exponential backoff retry on 429 / 403 / 5xx / timeout / network errors.
+      - Circuit breaker: after `max_consecutive_failures` requests that failed
+        even after all retries, raise SiteUnreachableError immediately.
+      - impersonate: nếu truyền (vd "chrome") thì dùng curl_cffi để giả TLS
+        fingerprint của trình duyệt thật (qua được các site chặn httpx).
+        Để None thì dùng httpx như cũ.
 
-    Usage (async context manager, so the underlying connection pool is
-    always closed):
-
+    Usage:
         async with AsyncHttpClient(headers=MY_HEADERS, concurrency=4) as client:
             response = await client.get(url, params=params)
-            response = await client.post(url, json=payload)
     """
 
     def __init__(
@@ -58,25 +69,44 @@ class AsyncHttpClient:
         backoff_cap: float = 60.0,
         timeout: float = 15.0,
         max_consecutive_failures: int = 3,
+        impersonate: Optional[str] = None,
     ):
-        self._client = httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True)
+        self._impersonate = impersonate
+        self._client = self._build_client(headers, timeout, impersonate)
         self._semaphore = asyncio.Semaphore(concurrency)
 
         self.base_min_delay = base_min_delay
         self.base_max_delay = base_max_delay
-        # Grows (up to a cap) after 429/403/timeout so ALL subsequent requests
-        # slow down, not just the one that got throttled; decays after successes.
         self._delay_multiplier = 1.0
 
         self.max_retries = max_retries
         self.backoff_base = backoff_base
         self.backoff_cap = backoff_cap
 
-        # Circuit breaker: count requests that failed even after all retries.
         self._consecutive_failures = 0
         self.max_consecutive_failures = max_consecutive_failures
 
-    async def get(self, url: str, params: Optional[dict] = None) -> httpx.Response:
+    @staticmethod
+    def _build_client(headers: Optional[dict], timeout: float, impersonate: Optional[str]):
+        if not impersonate:
+            return httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True)
+
+        if AsyncSession is None:
+            raise RuntimeError("impersonate cần curl_cffi: pip install curl_cffi")
+
+        # curl_cffi tự gửi User-Agent/sec-ch-ua khớp với fingerprint Chrome.
+        # Nếu ghi đè User-Agent bằng giá trị khác phiên bản thì dễ bị lộ.
+        clean_headers = {
+            k: v for k, v in (headers or {}).items() if k.lower() != "user-agent"
+        }
+        return AsyncSession(
+            headers=clean_headers,
+            timeout=timeout,
+            impersonate=impersonate,
+            allow_redirects=True,
+        )
+
+    async def get(self, url: str, params: Optional[dict] = None):
         return await self.request("GET", url, params=params)
 
     async def post(
@@ -84,7 +114,7 @@ class AsyncHttpClient:
         url: str,
         json: Optional[Any] = None,
         params: Optional[dict] = None,
-    ) -> httpx.Response:
+    ):
         return await self.request("POST", url, params=params, json=json)
 
     async def request(
@@ -93,10 +123,8 @@ class AsyncHttpClient:
         url: str,
         params: Optional[dict] = None,
         json: Optional[Any] = None,
-    ) -> httpx.Response:
+    ):
         async with self._semaphore:
-            # Check AFTER getting the semaphore, so requests that were
-            # already waiting also fail fast once the breaker has tripped.
             self._check_circuit()
             await self._adaptive_delay()
             response = await self._request_with_retry(method, url, params, json)
@@ -130,7 +158,7 @@ class AsyncHttpClient:
         url: str,
         params: Optional[dict],
         json: Optional[Any],
-    ) -> httpx.Response:
+    ):
         attempt = 0
         while True:
             try:
@@ -140,7 +168,7 @@ class AsyncHttpClient:
                 response.raise_for_status()
                 return response
 
-            except (_RetryableStatus, httpx.TimeoutException, httpx.TransportError) as exc:
+            except _NETWORK_ERRORS as exc:
                 attempt += 1
                 status = getattr(exc, "status_code", "network/timeout")
                 if status in (429, 403, "network/timeout"):
@@ -159,7 +187,10 @@ class AsyncHttpClient:
                 await asyncio.sleep(wait)
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        if self._impersonate:
+            await self._client.close()
+        else:
+            await self._client.aclose()
 
     async def __aenter__(self) -> "AsyncHttpClient":
         return self

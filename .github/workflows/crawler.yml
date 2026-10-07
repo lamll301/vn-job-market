@@ -2,7 +2,7 @@ name: Run Job Crawler
 
 on:
   schedule:
-    - cron: '0 1 * * *' # Chạy tự động lúc 01:00 UTC (8:00 sáng giờ VN)
+    - cron: '0 20 * * 1-5' # Chạy tự động lúc 20:00 UTC (tương đương 03:00 sáng hôm sau giờ Việt Nam)
   workflow_dispatch: # Nút bấm chạy thủ công trên GitHub UI
 
 jobs:

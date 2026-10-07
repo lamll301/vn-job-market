@@ -64,10 +64,12 @@ class CrawlPipeline:
 
         try:
             await self._produce(queue)
-        except SiteUnreachableError:
-            self._stop.set()  # failure happened on a listing page
+        except Exception as e:
+            # Lỗi ở trang danh sách (403, timeout, SiteUnreachableError...)
+            # -> coi như site không dùng được, dừng gọn thay vì crash runner.
+            print(f"    [{self.list_fetcher.source}] [ERROR] listing failed: {e}")
+            self._stop.set()
         finally:
-            # One sentinel per consumer tells it there's no more work coming.
             for _ in consumers:
                 await queue.put(None)
 
