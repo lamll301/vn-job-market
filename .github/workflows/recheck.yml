@@ -33,4 +33,4 @@ jobs:
           MONGODB_DATABASE: ${{ secrets.MONGODB_DATABASE }}
           PYTHONPATH: src
         run: |
-          python src/recheck_runner.py
+          python cmd/recheck.py
