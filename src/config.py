@@ -96,3 +96,25 @@ TOPCV_SEARCHES = {
         }
     }
 }
+
+# ---------------- Re-check ----------------
+RECHECK_MIN_AGE_DAYS = 3          # < 7 ngày: job mới, bỏ qua
+RECHECK_MAX_AGE_DAYS = 30         # > 30 ngày: ngừng re-check
+RECHECK_EXPIRY_BUFFER_DAYS = 1    # sắp hết hạn trong N ngày: ngừng re-check
+RECHECK_INTERVAL_DAYS = 7         # 1 job chỉ re-check tối đa 1 lần / N ngày
+RECHECK_BATCH_SIZE = 10           # số job xử lý song song mỗi đợt
+
+# Field so sánh để phát hiện thay đổi
+RECHECK_TRACKED_FIELDS = (
+    "description", 
+    "requirements", 
+    "benefits", 
+    "contact", 
+    "salary", 
+    "location", 
+    "address", 
+    "expired_at", 
+    # "specifications",
+)
+# Trang chi tiết trả mã này thì coi như tin đã bị gỡ
+RECHECK_CLOSED_STATUS_CODES = (404, 410)

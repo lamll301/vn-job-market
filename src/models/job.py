@@ -23,3 +23,5 @@ class Job:
     crawled_at: datetime
     # raw_data: dict[str, Any]
     specifications: dict[str, Any] = field(default_factory=dict)
+    last_rechecked_at: Optional[datetime] = None
+    is_closed: bool = False

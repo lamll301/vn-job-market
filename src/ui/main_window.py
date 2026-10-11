@@ -100,8 +100,8 @@ class MainWindow:
     # ============================================================
 
     def _configure_window(self):
-        self.root.title("Job Crawler")
-
+        self.root.title("Vietnam Job Market")
+        self.root.iconbitmap("assets/sunflower_10761.ico")
         self.root.resizable(True, True)
 
         self.root.minsize(

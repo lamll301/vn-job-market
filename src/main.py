@@ -6,7 +6,7 @@ import customtkinter as ctk
 from ui.main_window import MainWindow
 from database.repository import JobRepository
 from database.backup import backup_database
-from core.run import run_all
+from core.run import run_all, run_recheck
 
 sys.stdout.reconfigure(encoding='utf-8')
 
@@ -31,6 +31,18 @@ def run_crawler() -> None:
     except Exception as exc:
         print(f"\n[X] Đã xảy ra lỗi: {exc}")
 
+async def async_recheck() -> None:
+    await run_recheck(JobRepository())
+
+def run_recheck_job() -> None:
+    """Re-check job 7-30 ngày tuổi (chạy riêng, không cào job mới)."""
+    try:
+        asyncio.run(async_recheck())
+    except KeyboardInterrupt:
+        print("\n[!] Đã dừng chương trình do người dùng bấm Ctrl+C.")
+    except Exception as exc:
+        print(f"\n[X] Đã xảy ra lỗi: {exc}")
+
 def run_backup() -> None:
     try:
         backup_database()
@@ -42,4 +54,5 @@ def run_backup() -> None:
 if __name__ == "__main__":
     # run_ui()
     # run_crawler()
+    run_recheck_job()
     # run_backup()

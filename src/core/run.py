@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from contextlib import AsyncExitStack
+from dataclasses import dataclass, field
+
 from config import CAREERLINK_SEARCHES, TOPCV_SEARCHES, VIETNAMWORKS_SEARCHES
-from core.careerlink_pipeline import CAREERLINK_HEADERS
+from core.careerlink_pipeline import CAREERLINK_HEADERS, CareerLinkDetailEnricher
 from core.careerlink_pipeline import build_pipeline as build_careerlink_pipeline
 from core.http_client import AsyncHttpClient, SiteUnreachableError
-from core.topcv_pipeline import TOPCV_HEADERS
+from core.recheck import RecheckService
+from core.topcv_pipeline import TOPCV_HEADERS, TopCVDetailEnricher
 from core.topcv_pipeline import build_pipeline as build_topcv_pipeline
-from core.vietnamworks_pipeline import VIETNAMWORKS_HEADERS
+from core.vietnamworks_pipeline import VIETNAMWORKS_HEADERS, VietnamWorksDetailEnricher
 from core.vietnamworks_pipeline import build_pipeline as build_vietnamworks_pipeline
 from database.repository import JobRepository
 
@@ -114,3 +118,63 @@ async def run_all(repository: JobRepository) -> None:
     await run_vietnamworks(repository, concurrency=4)
     await run_careerlink(repository, concurrency=2)
     await run_topcv(repository, concurrency=2)
+
+
+@dataclass(frozen=True)
+class _RecheckSpec:
+    headers: dict
+    enricher_cls: type
+    http_options: dict = field(default_factory=dict)
+    max_jobs: int | None = None  # trần số job mỗi lần chạy; None = không giới hạn
+
+
+# Thông số HTTP giống với run_vietnamworks / run_careerlink / run_topcv.
+# Thêm site mới = thêm 1 dòng ở đây. Site nào tạm tắt thì xóa/comment dòng đó.
+_RECHECK_SPECS = {
+    "vietnamworks": _RecheckSpec(
+        headers=VIETNAMWORKS_HEADERS,
+        enricher_cls=VietnamWorksDetailEnricher,
+        http_options={"concurrency": 4, "base_min_delay": 1.0,
+                      "base_max_delay": 2.5, "max_retries": 4},
+        max_jobs=None,
+    ),
+    "careerlink": _RecheckSpec(
+        headers=CAREERLINK_HEADERS,
+        enricher_cls=CareerLinkDetailEnricher,
+        http_options={"concurrency": 2, "base_min_delay": 3.0,
+                      "base_max_delay": 6.0, "max_retries": 3},
+        max_jobs=100,
+    ),
+    "topcv": _RecheckSpec(
+        headers=TOPCV_HEADERS,
+        enricher_cls=TopCVDetailEnricher,
+        http_options={"concurrency": 2, "base_min_delay": 3.0,
+                      "base_max_delay": 6.0, "max_retries": 3,
+                      "impersonate": "chrome"},
+        max_jobs=100,
+    ),
+}
+
+
+async def run_recheck(repository: JobRepository) -> None:
+    """Cập nhật lại các job 7-30 ngày tuổi (độc lập với crawl)."""
+    print("==================================================")
+    print("       Bắt đầu tiến trình re-check dữ liệu        ")
+    print("==================================================")
+
+    async with AsyncExitStack() as stack:
+        enrichers = {}
+        for source, spec in _RECHECK_SPECS.items():
+            http_client = await stack.enter_async_context(
+                AsyncHttpClient(headers=spec.headers, **spec.http_options)
+            )
+            enrichers[source] = spec.enricher_cls(http_client=http_client)
+
+        service = RecheckService(
+            repository=repository,
+            enrichers=enrichers,
+            max_jobs={source: spec.max_jobs for source, spec in _RECHECK_SPECS.items()},
+        )
+        stats = await service.run()
+
+    print(f"\n[OK] Hoàn thành re-check: {dict(stats)}")
