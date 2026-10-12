@@ -2,8 +2,7 @@ name: Run Job Re-check
 
 on:
   schedule:
-    - cron: '0 5 * * 0,1'
-      timezone: 'Asia/Ho_Chi_Minh'
+    - cron: '0 22 * * 0,6'
   workflow_dispatch:
 
 jobs:

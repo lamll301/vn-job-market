@@ -98,7 +98,7 @@ TOPCV_SEARCHES = {
 }
 
 # ---------------- Re-check ----------------
-RECHECK_MIN_AGE_DAYS = 3          # < 7 ngày: job mới, bỏ qua
+RECHECK_MIN_AGE_DAYS = 3          # < 3 ngày: job mới, bỏ qua
 RECHECK_MAX_AGE_DAYS = 30         # > 30 ngày: ngừng re-check
 RECHECK_EXPIRY_BUFFER_DAYS = 1    # sắp hết hạn trong N ngày: ngừng re-check
 RECHECK_INTERVAL_DAYS = 7         # 1 job chỉ re-check tối đa 1 lần / N ngày

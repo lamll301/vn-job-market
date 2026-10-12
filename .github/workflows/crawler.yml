@@ -2,8 +2,7 @@ name: Run Job Crawler
 
 on:
   schedule:
-    - cron: '0 3 * * 2-6'
-      timezone: 'Asia/Ho_Chi_Minh'
+    - cron: '0 20 * * 1-5'
   workflow_dispatch:
 
 jobs:
