@@ -12,6 +12,10 @@ if not MONGODB_URI:
 if not MONGODB_DATABASE:
     raise ValueError("MONGODB_DATABASE is not configured")
 
+# Telegram
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
 # VietnamWorks
 # https://www.vietnamworks.com/viec-lam?l=2.4.5&g=5&j=35.28.27.31.25.29.36.34.30.33.26.32.37
 VIETNAMWORKS_SEARCH_URL = "https://ms.vietnamworks.com/job-search/v1.0/search"

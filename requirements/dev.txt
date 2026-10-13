@@ -1,0 +1,4 @@
+# Máy local: crawler + giao diện
+-r crawler.txt
+customtkinter==6.0.0
+pypdf==6.12.2
